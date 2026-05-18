@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <title>Wavefront Sweep</title>
+    <title>Robotic Grid Assembly</title>
     
     <style>
       body, html {
@@ -205,7 +205,7 @@
       
       <!-- Sidebar Overlay -->
       <aside id="sidebar">
-        <h3>Wavefront Sweep</h3>
+        <h3>Robotic Grid Assembly</h3>
         <div>
           <label style="font-size: 12px; color: #95a5a6; display: block; margin-bottom: 4px;">Presets</label>
           <select id="preset-select" style="width: 100%; background-color: #34495e; color: white; border: 1px solid #415b76; border-radius: 3px; padding: 5px 8px; font-size: 13px; cursor: pointer;">
@@ -218,6 +218,14 @@
           <button id="load-btn" style="flex: 1;">Load File</button>
         </div>
         <input type="file" id="load-input" accept=".json" style="display: none;">
+
+        <div style="margin-top: 15px;">
+          <label style="font-size: 12px; color: #95a5a6; display: block; margin-bottom: 4px;">Algorithm Mode</label>
+          <select id="algorithm-mode" style="width: 100%; background-color: #34495e; color: white; border: 1px solid #415b76; border-radius: 3px; padding: 5px 8px; font-size: 13px; cursor: pointer;">
+            <option value="wavefront-sweep">Wavefront Sweep</option>
+            <option value="outer-peel">Outer Peel</option>
+          </select>
+        </div>
 
         <div style="margin-top: 15px;">
           <label style="font-size: 12px; color: #95a5a6; display: block; margin-bottom: 4px;">Animation Level</label>

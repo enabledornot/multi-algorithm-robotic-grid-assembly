@@ -1,6 +1,12 @@
 import * as PIXI from 'pixi.js';
 import { gridMap } from './lib.js';
-import { runAlgorithm as executeAlgorithm } from './algorithm.js';
+import { runAlgorithm as executeWavefrontSweep } from './algorithm.js';
+import { runAlgorithm as executeOuterPeel } from './outerPeel.js';
+
+function getAlgorithmRunner() {
+  const mode = document.getElementById('algorithm-mode').value;
+  return mode === 'outer-peel' ? executeOuterPeel : executeWavefrontSweep;
+}
 const presets = import.meta.glob('./models/*.json', { eager: true });
 
 // Wrap everything in an async IIFE — top-level await hangs in Vite production builds
@@ -423,7 +429,7 @@ function runAlgorithmWithStartVertex(gridX, gridY, autoPlay = true) {
     return;
   }
 
-  const { eventLog, vcompCount } = executeAlgorithm(matrix, { startX: matrixX, startY: matrixY });
+  const { eventLog, vcompCount } = getAlgorithmRunner()(matrix, { startX: matrixX, startY: matrixY });
   edgeData = { eventLog, minX, minY, flipped: flipXY };
   const vertCount = eventLog.events.filter(e => e.type === 'addEdge' && e.edgeType === 'vertical').length;
   const horzCount = eventLog.events.filter(e => e.type === 'addEdge' && e.edgeType === 'horizontal').length;
@@ -623,7 +629,7 @@ function runAlgorithm(autoPlay = true) {
     return;
   }
 
-  const { eventLog, vcompCount } = executeAlgorithm(matrix);
+  const { eventLog, vcompCount } = getAlgorithmRunner()(matrix);
   edgeData = { eventLog, minX, minY, flipped: flipXY };
   const vertCount = eventLog.events.filter(e => e.type === 'addEdge' && e.edgeType === 'vertical').length;
   const horzCount = eventLog.events.filter(e => e.type === 'addEdge' && e.edgeType === 'horizontal').length;
