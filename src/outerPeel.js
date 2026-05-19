@@ -190,12 +190,15 @@ export function outerBoundaryWalk(idA, idB, outsidePos) {
   //   directions before stopping, rather than halting on the first return.
   const maxSteps = cells.length * 8 + 8;
   let steps = 0;
-  let done              = false;
-  let everMoved         = false;
-  let entryDir          = null; // move direction that brought the walker to the current cell
-  let firstExitDir      = null; // move direction of the very first step out of idA
-  let firstStepNeighborId = null; // id of the cell reached on the very first step
-  let pendingTailId     = null; // set to the turnaround cell ID until the next unwalked cell is reached
+  let done                = false;
+  let everMoved           = false;
+  let entryDir            = null;  // move direction that brought the walker to the current cell
+  let firstExitDir        = null;  // move direction of the very first step out of idA
+  let firstStepNeighborId = null;  // id of the cell reached on the very first step
+  let pendingTailId       = null;  // set to the turnaround cell ID until resolved
+  let pendingTailFromId   = null;  // the cell before the tail tip (its boundary-side neighbour)
+  let startSameSideReturn = false; // true when idA is confirmed to be a tail tip
+  let startFromId         = null;  // the cell the walker came from when it returned same-side to idA
 
   while (!done && steps < maxSteps) {
     steps++;
@@ -213,31 +216,41 @@ export function outerBoundaryWalk(idA, idB, outsidePos) {
       const neighborId = getNeighborId(cell, dirIdx);
       if (neighborId === null) continue;
 
-      // Full-loop stop: back at start and about to retake the first step → done
+      // Full-loop stop: back at start and about to retake the first step → done.
+      // Resolve any pending tail before stopping so it is not abandoned.
       if (idA === idB && everMoved && currentId === idA && neighborId === firstStepNeighborId) {
+        if (pendingTailId !== null) {
+          handleTail(pendingTailId, pendingTailFromId);
+          pendingTailId     = null;
+          pendingTailFromId = null;
+        }
         done = true;
         break;
       }
 
       // Turnaround: exiting through the same face we entered — mark current cell again
-      // and record it as the tail origin
+      // and record it as the tail origin. The cell before it (the boundary side)
+      // is the cell we are at right now before moving, stored as pendingTailFromId
+      // so handleTail knows which direction leads back to the boundary.
       if (entryDir !== null && dirIdx === (entryDir + 2) % 4) {
         cells[currentId].walked++;
         emitWalked(currentId);
-        pendingTailId = currentId;
+        pendingTailId     = currentId;
+        pendingTailFromId = getNeighborId(cells[currentId], (entryDir + 2) % 4); // the cell we came from
       }
 
       // If we have a pending tail, check the cell we're about to step into.
       // The last double-visited cell is the one we're leaving (currentId) —
       // detected the moment the next cell's walk count is not already 1.
       if (pendingTailId !== null && cells[neighborId].walked !== 1) {
-        handleTail(pendingTailId, currentId);
-        pendingTailId = null;
+        handleTail(pendingTailId, pendingTailFromId);
+        pendingTailId     = null;
+        pendingTailFromId = null;
       }
 
       outIdx = (dirIdx + 1) % 4;
       if (firstExitDir === null) {
-        firstExitDir      = dirIdx;
+        firstExitDir        = dirIdx;
         firstStepNeighborId = neighborId;
       }
       entryDir  = dirIdx;
@@ -247,12 +260,14 @@ export function outerBoundaryWalk(idA, idB, outsidePos) {
 
       if (currentId === idA) {
         // Returning home: mark start cell again only if it's a same-side return.
-        // Do NOT overwrite pendingTailId here — the real tail origin was already
-        // recorded at the branch tip that caused this same-side return, and
-        // overwriting it would prevent that tail from ever being resolved.
+        // Record startSameSideReturn so idA can be handled after the loop.
+        // startFromId is the cell we stepped from to get back to idA, giving
+        // handleTail the correct boundary-side neighbour to use as prevId.
         if (dirIdx === (firstExitDir + 2) % 4) {
           cells[currentId].walked++;
           emitWalked(currentId);
+          startSameSideReturn = true;
+          startFromId = getNeighborId(cells[currentId], (firstExitDir + 2) % 4); // boundary-side neighbour of idA (opposite of first exit)
         }
       } else {
         cells[currentId].walked++;
@@ -266,26 +281,39 @@ export function outerBoundaryWalk(idA, idB, outsidePos) {
 
     if (!moved && !done) break; // Dead end — should not occur on a valid boundary
   }
+
+  // Resolve any pending tail that was not dispatched during the loop.
+  if (pendingTailId !== null) {
+    handleTail(pendingTailId, pendingTailFromId);
+    pendingTailId     = null;
+    pendingTailFromId = null;
+  }
+
+  // If idA itself is a tail tip (confirmed by its own same-side return), remove it.
+  // startFromId is the boundary-side neighbour of idA, used as prevId so that
+  // handleTail walks inward rather than back onto the boundary.
+  if (startSameSideReturn) {
+    handleTail(idA, startFromId);
+  }
 }
 
 /**
  * Remove the tail segment starting at tailCellId back to the nearest cycle.
  *
- * Traverses from tailCellId toward the shape interior, removing each cell as
- * long as it is a pure chain link — exactly one unvisited forward neighbour
- * (not counting the cell we came from). Stops without removing the first cell
- * that has 0 or 2+ forward neighbours: 0 means a dead end already resolved,
- * 2+ means a junction that belongs to a cycle and must be preserved.
+ * Starts with prevId=null so the tip cell's only unvisited neighbour (the next
+ * cell along the tail toward the cycle) is included in `forward` from the very
+ * first step. As each cell is removed (isVisited=true), the isVisited filter
+ * prevents the traversal from going backward, so the chain naturally advances
+ * inward without needing an explicit fromId.
  *
- * This degree-based criterion handles the case where tailCellId ===
- * firstUnmarkedId (e.g. a tail rooted at the start vertex) without requiring
- * a separate edge case.
+ * Stops when:
+ *   - forward.length === 0: isolated tip (no further chain), remove and stop.
+ *   - forward.length >= 2: junction belonging to a cycle, stop without removing.
  *
- * @param {number} tailCellId      - The turnaround cell where the tail begins
- * @param {number} _firstUnmarkedId - The last double-visited boundary cell
- *   (retained as a parameter for context/debugging; not used as a stop condition)
+ * @param {number} tailCellId  - The turnaround cell where the tail begins
+ * @param {number} _fromId     - Retained for call-site documentation; not used
  */
-function handleTail(tailCellId, _firstUnmarkedId) {
+function handleTail(tailCellId, _fromId) {
   let prevId    = null;
   let currentId = tailCellId;
 
@@ -294,9 +322,18 @@ function handleTail(tailCellId, _firstUnmarkedId) {
     const forward = [cell.up, cell.right, cell.down, cell.left]
       .filter(nId => nId !== null && nId !== prevId && !cells[nId].isVisited);
 
-    // Stop at a junction (cycle) or complete dead end — do not remove this cell
-    if (forward.length !== 1) break;
+    if (forward.length === 0) {
+      // Isolated tip — remove and stop
+      removeFromShape(currentId);
+      break;
+    }
 
+    if (forward.length >= 2) {
+      // Junction belonging to a cycle — stop without removing
+      break;
+    }
+
+    // Exactly one forward neighbour: chain link, remove and advance
     removeFromShape(currentId);
     prevId    = currentId;
     currentId = forward[0];
