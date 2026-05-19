@@ -328,7 +328,14 @@ function handleTail(tailCellId, _fromId) {
       break;
     }
 
-    if (forward.length >= 2) {
+    // Count all non-null, non-prevId neighbours (including already-removed ones).
+    // Using the live `forward` count is unreliable once prior handleTail calls
+    // have removed neighbours — a genuine junction can appear to be a chain link.
+    // The original adjacency is still intact in the cell object, so this count
+    // is stable regardless of removal order.
+    const activeNeighbors = [cell.up, cell.right, cell.down, cell.left]
+      .filter(nId => nId !== null && nId !== prevId).length;
+    if (activeNeighbors >= 2) {
       // Junction belonging to a cycle — stop without removing
       break;
     }
