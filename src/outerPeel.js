@@ -1,15 +1,35 @@
 import { EventLog } from './lib.js';
 
 const cells = [];
+const buildOrder = []; // ordered list of { col, row } — cells in assembly sequence
 let eventLog;
 
 const COLOR_ADDED        = 0xFFB3B3; // light red
 const COLOR_WALKED_ONCE  = 0xFFA500; // orange — first time walked
 const COLOR_WALKED_TWICE = 0x9B59B6; // purple — second time walked
+const COLOR_REMOVED      = 0x2ECC71; // green  — removed from shape / placed in build order
 
 function reset() {
   cells.length = 0;
+  buildOrder.length = 0;
   eventLog = new EventLog();
+}
+
+/**
+ * Remove a cell from the shape: marks it visited, emits a color event, and
+ * appends its coordinates to the build order. Ignored if already removed.
+ * Severing adjacency links is left to the caller (the algorithm handles
+ * neighbour unlinking as needed when it advances).
+ *
+ * @param {number} id - Cell ID to remove
+ */
+export function removeFromShape(id) {
+  const cell = cells[id];
+  if (cell.isVisited) return;
+  cell.isVisited = true;
+  eventLog.updateCell(cell.col, cell.row, COLOR_REMOVED);
+  eventLog.markComponent();
+  buildOrder.push({ col: cell.col, row: cell.row });
 }
 
 /**
@@ -162,15 +182,22 @@ export function outerBoundaryWalk(idA, idB, outsidePos) {
   //              = [(outIdx+2)%4, (outIdx+3)%4, outIdx, (outIdx+1)%4]
   //   new outIdx = (moveIdx + 1) % 4  (90° CW from move direction)
   //
-  // Use everMoved to distinguish the start of a full loop from the moment
-  // we return to idA=idB — without it the while condition fires immediately.
+  // Full-loop termination (idA === idB):
+  //   Stop when we return to idA and are about to take the same first step again
+  //   (neighborId === firstStepNeighborId). This ensures the walk goes all the way
+  //   around even when the start cell has multiple interior edges — e.g., a start
+  //   cell with a neighbor to the right AND below will correctly traverse both
+  //   directions before stopping, rather than halting on the first return.
   const maxSteps = cells.length * 8 + 8;
   let steps = 0;
-  let everMoved = false;
-  let entryDir     = null; // move direction that brought the walker to the current cell
-  let firstExitDir = null; // move direction of the very first step out of idA
+  let done              = false;
+  let everMoved         = false;
+  let entryDir          = null; // move direction that brought the walker to the current cell
+  let firstExitDir      = null; // move direction of the very first step out of idA
+  let firstStepNeighborId = null; // id of the cell reached on the very first step
+  let pendingTailId     = null; // set to the turnaround cell ID until the next unwalked cell is reached
 
-  while (!(currentId === idB && everMoved) && steps < maxSteps) {
+  while (!done && steps < maxSteps) {
     steps++;
     const cell = cells[currentId];
 
@@ -186,21 +213,43 @@ export function outerBoundaryWalk(idA, idB, outsidePos) {
       const neighborId = getNeighborId(cell, dirIdx);
       if (neighborId === null) continue;
 
+      // Full-loop stop: back at start and about to retake the first step → done
+      if (idA === idB && everMoved && currentId === idA && neighborId === firstStepNeighborId) {
+        done = true;
+        break;
+      }
+
       // Turnaround: exiting through the same face we entered — mark current cell again
+      // and record it as the tail origin
       if (entryDir !== null && dirIdx === (entryDir + 2) % 4) {
         cells[currentId].walked++;
         emitWalked(currentId);
+        pendingTailId = currentId;
+      }
+
+      // If we have a pending tail, check the cell we're about to step into.
+      // The last double-visited cell is the one we're leaving (currentId) —
+      // detected the moment the next cell's walk count is not already 1.
+      if (pendingTailId !== null && cells[neighborId].walked !== 1) {
+        handleTail(pendingTailId, currentId);
+        pendingTailId = null;
       }
 
       outIdx = (dirIdx + 1) % 4;
-      if (firstExitDir === null) firstExitDir = dirIdx;
+      if (firstExitDir === null) {
+        firstExitDir      = dirIdx;
+        firstStepNeighborId = neighborId;
+      }
       entryDir  = dirIdx;
       currentId = neighborId;
       everMoved = true;
       moved = true;
 
       if (currentId === idA) {
-        // Returning home: mark start cell again only if it's a same-side return
+        // Returning home: mark start cell again only if it's a same-side return.
+        // Do NOT overwrite pendingTailId here — the real tail origin was already
+        // recorded at the branch tip that caused this same-side return, and
+        // overwriting it would prevent that tail from ever being resolved.
         if (dirIdx === (firstExitDir + 2) % 4) {
           cells[currentId].walked++;
           emitWalked(currentId);
@@ -208,11 +257,49 @@ export function outerBoundaryWalk(idA, idB, outsidePos) {
       } else {
         cells[currentId].walked++;
         emitWalked(currentId);
+
+        // Partial-walk stop: reached the target cell
+        if (idA !== idB && currentId === idB) done = true;
       }
       break;
     }
 
-    if (!moved) break; // Dead end — should not occur on a valid boundary
+    if (!moved && !done) break; // Dead end — should not occur on a valid boundary
+  }
+}
+
+/**
+ * Remove the tail segment starting at tailCellId back to the nearest cycle.
+ *
+ * Traverses from tailCellId toward the shape interior, removing each cell as
+ * long as it is a pure chain link — exactly one unvisited forward neighbour
+ * (not counting the cell we came from). Stops without removing the first cell
+ * that has 0 or 2+ forward neighbours: 0 means a dead end already resolved,
+ * 2+ means a junction that belongs to a cycle and must be preserved.
+ *
+ * This degree-based criterion handles the case where tailCellId ===
+ * firstUnmarkedId (e.g. a tail rooted at the start vertex) without requiring
+ * a separate edge case.
+ *
+ * @param {number} tailCellId      - The turnaround cell where the tail begins
+ * @param {number} _firstUnmarkedId - The last double-visited boundary cell
+ *   (retained as a parameter for context/debugging; not used as a stop condition)
+ */
+function handleTail(tailCellId, _firstUnmarkedId) {
+  let prevId    = null;
+  let currentId = tailCellId;
+
+  while (true) {
+    const cell = cells[currentId];
+    const forward = [cell.up, cell.right, cell.down, cell.left]
+      .filter(nId => nId !== null && nId !== prevId && !cells[nId].isVisited);
+
+    // Stop at a junction (cycle) or complete dead end — do not remove this cell
+    if (forward.length !== 1) break;
+
+    removeFromShape(currentId);
+    prevId    = currentId;
+    currentId = forward[0];
   }
 }
 
@@ -241,5 +328,5 @@ export function runAlgorithm(matrix, _options = {}) {
   computePeelLayers();
   runPeelSweep();
   const stats = computeStats();
-  return { eventLog, vcompCount: cells.length, stats, cells: [...cells] };
+  return { eventLog, vcompCount: cells.length, stats, cells: [...cells], buildOrder: [...buildOrder] };
 }
