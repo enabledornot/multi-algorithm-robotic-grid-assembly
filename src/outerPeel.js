@@ -313,7 +313,11 @@ export function outerBoundaryWalk(idA, idB, outsidePos) {
  *
  * Stops when:
  *   - forward.length === 0: isolated tip (no further chain), remove and stop.
- *   - forward.length >= 2: junction belonging to a cycle, stop without removing.
+ *   - cell.walked < 2: reached a cycle cell (walked only once), stop without removing.
+ *   - forward.length >= 2: junction with multiple active forward paths, stop without
+ *     removing. This guards against the case where the boundary walker re-enters the
+ *     cycle cell adjacent to the tail (incrementing its walked count to 2) so the
+ *     walked < 2 check alone would not catch it.
  *
  * @param {number} tailCellId  - The turnaround cell where the tail begins
  * @param {number} _fromId     - Retained for call-site documentation; not used
@@ -333,26 +337,22 @@ function handleTail(tailCellId, _fromId) {
       break;
     }
 
-    // Count all non-null, non-prevId neighbours (including already-removed ones).
-    // Using the live `forward` count is unreliable once prior handleTail calls
-    // have removed neighbours — a genuine junction can appear to be a chain link.
-    // The original adjacency is still intact in the cell object, so this count
-    // is stable regardless of removal order.
-    const activeNeighbors = [cell.up, cell.right, cell.down, cell.left]
-      .filter(nId => nId !== null && nId !== prevId).length;
-    if (activeNeighbors >= 2) {
-      // Junction belonging to a cycle — stop without removing
+    if (cell.walked < 2 || forward.length >= 2) {
+      // Cycle cell (walked once) or junction (multiple active forward paths) — stop without removing.
+      // If walked >= 2, the extra count is an artifact of the boundary walker re-entering this
+      // cell when exiting the tail. Undo it so the cell reflects its true walk count.
+      if (cell.walked >= 2) {
+        cells[currentId].walked--;
+        setCellColor(currentId, COLOR_WALKED_ONCE);
+        eventLog.markComponent();
+      }
       break;
     }
 
-    // Exactly one forward neighbour: chain link, remove and advance
+    // Double-visited, single forward path: part of the tail — remove and advance
     removeFromShape(currentId);
     prevId    = currentId;
     currentId = forward[0];
-    cells[currentId].walked -= 1;
-    let w = cells[currentId].walked;
-    if (w === 1) setCellColor(currentId, COLOR_WALKED_ONCE);
-    else if (w === 2) setCellColor(currentId, COLOR_WALKED_TWICE);
     eventLog.markComponent();
   }
 }
