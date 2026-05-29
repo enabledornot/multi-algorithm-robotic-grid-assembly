@@ -344,6 +344,11 @@ function handleTail(tailCellId, _fromId) {
     removeFromShape(currentId);
     prevId    = currentId;
     currentId = forward[0];
+    cells[currentId].walked -= 1;
+    let w = cells[currentId].walked;
+    if (w === 1) eventLog.updateCell(cells[currentId].col, cells[currentId].row, COLOR_WALKED_ONCE);
+    else if (w === 2) eventLog.updateCell(cells[currentId].col, cells[currentId].row, COLOR_WALKED_TWICE);
+    eventLog.markComponent();
   }
 }
 
