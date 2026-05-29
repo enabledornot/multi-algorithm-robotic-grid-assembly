@@ -15,6 +15,11 @@ function reset() {
   eventLog = new EventLog();
 }
 
+function setCellColor(id, color) {
+  const cell = cells[id];
+  eventLog.updateCell(cell.col, cell.row, color);
+}
+
 /**
  * Remove a cell from the shape: marks it visited, emits a color event, and
  * appends its coordinates to the build order. Ignored if already removed.
@@ -27,7 +32,7 @@ export function removeFromShape(id) {
   const cell = cells[id];
   if (cell.isVisited) return;
   cell.isVisited = true;
-  eventLog.updateCell(cell.col, cell.row, COLOR_REMOVED);
+  setCellColor(id, COLOR_REMOVED);
   eventLog.markComponent();
   buildOrder.push({ col: cell.col, row: cell.row });
 }
@@ -74,7 +79,7 @@ function initializeCells(matrix) {
         walked:    0,
       });
 
-      eventLog.updateCell(col, row, COLOR_ADDED);
+      setCellColor(id, COLOR_ADDED);
 
       // If the previous cell in this column is directly above (row coordinate 1 away), link them
       if (prevId !== null && row === prevRow + 1) {
@@ -167,8 +172,8 @@ export function outerBoundaryWalk(idA, idB, outsidePos) {
 
   function emitWalked(id) {
     const w = cells[id].walked;
-    if (w === 1) eventLog.updateCell(cells[id].col, cells[id].row, COLOR_WALKED_ONCE);
-    else if (w === 2) eventLog.updateCell(cells[id].col, cells[id].row, COLOR_WALKED_TWICE);
+    if (w === 1) setCellColor(id, COLOR_WALKED_ONCE);
+    else if (w === 2) setCellColor(id, COLOR_WALKED_TWICE);
     eventLog.markComponent();
   }
 
@@ -346,8 +351,8 @@ function handleTail(tailCellId, _fromId) {
     currentId = forward[0];
     cells[currentId].walked -= 1;
     let w = cells[currentId].walked;
-    if (w === 1) eventLog.updateCell(cells[currentId].col, cells[currentId].row, COLOR_WALKED_ONCE);
-    else if (w === 2) eventLog.updateCell(cells[currentId].col, cells[currentId].row, COLOR_WALKED_TWICE);
+    if (w === 1) setCellColor(currentId, COLOR_WALKED_ONCE);
+    else if (w === 2) setCellColor(currentId, COLOR_WALKED_TWICE);
     eventLog.markComponent();
   }
 }
