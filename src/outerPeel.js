@@ -125,6 +125,67 @@ function computePeelLayers() {
 
 // TODO: Process peel layers from outermost to innermost, emitting EventLog events
 // and building the ordered assembly sequence.
+/**
+ * Follow the outer boundary walk path from cells[0] — stepping through removed
+ * (visited) cells without skipping them — and return the id and outsidePos of
+ * the first active (non-removed) cell encountered.
+ *
+ * This is more efficient than a linear index scan: the cost is proportional
+ * only to the number of removed cells at the head of the boundary path, not
+ * the total cell count.  If cells[0] is already active it is returned immediately.
+ *
+ * The outsidePos is derived from the outIdx at the moment of arrival so that
+ * the cycle walk continues with the correct orientation.
+ */
+function findCycleStart() {
+  if (!cells[0].isVisited) {
+    return { id: 0, outsidePos: { col: cells[0].col - 1, row: cells[0].row } };
+  }
+
+  function neighborId(cell, dirIdx) {
+    if (dirIdx === 0) return cell.up;
+    if (dirIdx === 1) return cell.right;
+    if (dirIdx === 2) return cell.down;
+    return cell.left;
+  }
+
+  // cells[0] has its left neighbour guaranteed exterior → initial outIdx = west (3)
+  let outIdx    = 3;
+  let currentId = 0;
+  const maxSeek = cells.length * 8 + 8;
+
+  for (let s = 0; s < maxSeek; s++) {
+    const cell     = cells[currentId];
+    const priority = [
+      (outIdx + 2) % 4,
+      (outIdx + 3) % 4,
+      outIdx,
+      (outIdx + 1) % 4,
+    ];
+
+    let moved = false;
+    for (const dirIdx of priority) {
+      const nId = neighborId(cell, dirIdx);
+      if (nId === null) continue;
+      outIdx    = (dirIdx + 1) % 4;
+      currentId = nId;
+      moved     = true;
+
+      if (!cells[currentId].isVisited) {
+        // Arrived at the first active cell — derive outsidePos from outIdx
+        const c  = cells[currentId];
+        const dc = outIdx === 1 ? 1 : outIdx === 3 ? -1 : 0;
+        const dr = outIdx === 2 ? 1 : outIdx === 0 ? -1 : 0;
+        return { id: currentId, outsidePos: { col: c.col + dc, row: c.row + dr } };
+      }
+      break;
+    }
+    if (!moved) break;
+  }
+
+  return null; // valid shapes should never reach here
+}
+
 function runPeelSweep() {
   if (cells.length === 0) return;
 
@@ -135,8 +196,12 @@ function runPeelSweep() {
   outerBoundaryWalk(0, 0, outsidePos);
 
   // Second pass: assign cycleIds using walked counts from the first walk.
-  // Cell 0 and outsidePos are reused — the cycle walk follows the same path.
-  outerBoundaryWalkCycle(0, 0, outsidePos, 0);
+  // Walk the boundary from cells[0] through any removed tail cells to find
+  // the first active cell and a correctly-oriented outsidePos for it.
+  const cycleStart = findCycleStart();
+  if (cycleStart) {
+    outerBoundaryWalkCycle(cycleStart.id, cycleStart.id, cycleStart.outsidePos, 0);
+  }
 
   eventLog.markWavefront();
 }
@@ -379,10 +444,6 @@ export function outerBoundaryWalkCycle(idA, idB, outsidePos, startingCycleId) {
     eventLog.markComponent();
   }
 
-  // Capture whether start cell is still active before the walk begins.
-  // Used by the start-cell present stop condition below.
-  const startCellPresent = !startCell.isVisited;
-
   const maxSteps = cells.length * 8 + 8;
   let steps = 0;
   let done                = false;
@@ -391,6 +452,30 @@ export function outerBoundaryWalkCycle(idA, idB, outsidePos, startingCycleId) {
   let firstStepNeighborId = null;
 
   let currentId = idA;
+
+  // Pre-seek: if the start cell is present but unlabeled (it is a bridge cell),
+  // take one step to its first active neighbour. This marks the start cell as
+  // visited and positions the walk correctly. The main loop handles everything
+  // from here onward — no further special-casing is needed.
+  if (!startCell.isVisited && startCell.cycleId === null) {
+    const seekPriority = [
+      (outIdx + 2) % 4,
+      (outIdx + 3) % 4,
+      outIdx,
+      (outIdx + 1) % 4,
+    ];
+    for (const dirIdx of seekPriority) {
+      const neighborId = getNeighborId(startCell, dirIdx);
+      if (neighborId === null) continue;
+      if (cells[neighborId].isVisited) continue;
+      outIdx              = (dirIdx + 1) % 4;
+      firstExitDir        = dirIdx;
+      firstStepNeighborId = neighborId;
+      currentId           = neighborId;
+      everMoved           = true;
+      break;
+    }
+  }
 
   while (!done && steps < maxSteps) {
     steps++;
@@ -407,6 +492,7 @@ export function outerBoundaryWalkCycle(idA, idB, outsidePos, startingCycleId) {
     for (const dirIdx of priority) {
       const neighborId = getNeighborId(cell, dirIdx);
       if (neighborId === null) continue;
+      if (cells[neighborId].isVisited) continue; // treat removed cells as non-existent
 
       // Full-loop stop: back at start and about to retake the first step → done.
       if (idA === idB && everMoved && currentId === idA && neighborId === firstStepNeighborId) {
@@ -438,19 +524,6 @@ export function outerBoundaryWalkCycle(idA, idB, outsidePos, startingCycleId) {
         } else {
           currentCycleId = nextCycleId++;
         }
-      }
-
-      // Start-cell present stop: when idA has not been removed, halt as soon as
-      // the walk crosses from a removed (invisible) cell to an active one.
-      // Assign cycleId before stopping so the destination is not left unlabeled.
-      if (startCellPresent && cell.isVisited && !neighbor.isVisited) {
-        if (neighbor.walked === 1 && neighbor.cycleId == null) {
-          neighbor.cycleId = currentCycleId;
-          setCellLabel(neighborId, currentCycleId);
-          eventLog.markComponent();
-        }
-        done = true;
-        break;
       }
 
       outIdx = (dirIdx + 1) % 4;
