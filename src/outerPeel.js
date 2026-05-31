@@ -75,6 +75,7 @@ function initializeCells(matrix) {
         left:      null,
         right:     null,
         layer:     undefined,
+        cycleId:   null,
         isVisited: false,
         walked:    0,
       });
@@ -304,25 +305,40 @@ export function outerBoundaryWalk(idA, idB, outsidePos) {
 
 /**
  * Walks the outer boundary of the shape from cell idA to cell idB using the
- * same left-hand rule traversal as outerBoundaryWalk, but uses data recorded
- * by a previous walk to identify cycles in the graph.
+ * same left-hand rule traversal as outerBoundaryWalk, assigning cycle IDs to
+ * cells based on walked counts recorded by the previous walk.
+ *
+ * Terminology:
+ *   - Cycle cell:  cell.walked === 1 — part of an exterior visible cycle;
+ *                  receives a cycleId.
+ *   - Bridge cell: cell.walked === 2 — a connecting segment between two cycles
+ *                  (former tail or double-traversed edge); does NOT receive a
+ *                  cycleId except the very first bridge cell of each entry,
+ *                  which retains the incoming cycleId to support reconnection.
+ *
+ * Walk behaviour:
+ *   - Cycle cells: assign currentCycleId to each cell visited.
+ *   - Cycle → bridge transition: save currentCycleId; continue traversing.
+ *   - Bridge → cycle transition:
+ *       • If destination already has a cycleId → restore it as currentCycleId
+ *         (reconnecting to a known cycle).
+ *       • Otherwise → allocate a new cycleId (entering a previously unseen cycle).
  *
  * Termination:
- *   - Full-loop (idA === idB): same condition as outerBoundaryWalk — stop when
- *     the walker returns to idA and is about to retake the first step.
+ *   - Full-loop  (idA === idB): stop when the walker returns to idA and is
+ *     about to retake the same first step (identical to outerBoundaryWalk).
  *   - Partial walk (idA !== idB): stop when idB is reached.
- *   - Start-cell present: if idA still exists (isVisited === false), the walk
- *     continues until the first non-visited (non-invisible) cell is encountered.
+ *   - Start-cell present: if idA has not been removed (isVisited === false),
+ *     stop at the first non-visited (non-invisible) cell encountered.
  *
- * Cycle detection logic is TODO — see inline stub.
- *
- * @param {number} idA - Start cell ID (assumed to be on the outer boundary)
- * @param {number} idB - End cell ID (assumed to be on the outer boundary)
- * @param {{ col: number, row: number }} outsidePos - An exterior (empty) cell
- *   position adjacent to idA. Determines which side of the boundary is "outside"
- *   and sets the initial walking orientation.
+ * @param {number} idA              - Start cell ID (on the outer boundary)
+ * @param {number} idB              - End cell ID   (idA === idB for a full loop)
+ * @param {{ col: number, row: number }} outsidePos - Exterior position adjacent
+ *   to idA; sets the initial outside direction.
+ * @param {number} startingCycleId  - The cycle ID to begin with.
+ * @returns {number} The next available cycle ID after this walk completes.
  */
-export function outerBoundaryWalkCycle(idA, idB, outsidePos) {
+export function outerBoundaryWalkCycle(idA, idB, outsidePos, startingCycleId) {
   // Direction helpers — identical to outerBoundaryWalk
   function getNeighborId(cell, dirIdx) {
     if (dirIdx === 0) return cell.up;
@@ -343,6 +359,18 @@ export function outerBoundaryWalkCycle(idA, idB, outsidePos) {
     outsidePos.col - startCell.col,
     outsidePos.row - startCell.row
   );
+
+  let currentCycleId   = startingCycleId;
+  let nextCycleId      = startingCycleId + 1;
+
+  // Assign cycleId to start cell if it is a cycle cell (walked === 1)
+  if (startCell.walked === 1) {
+    startCell.cycleId = currentCycleId;
+  }
+
+  // Capture whether start cell is still active before the walk begins.
+  // Used by the start-cell present stop condition below.
+  const startCellPresent = !startCell.isVisited;
 
   const maxSteps = cells.length * 8 + 8;
   let steps = 0;
@@ -375,9 +403,32 @@ export function outerBoundaryWalkCycle(idA, idB, outsidePos) {
         break;
       }
 
-      // TODO: cycle detection — use data from the previous walk recorded on
-      // cells (e.g. walked counts, layer assignments) to identify when the
-      // traversal re-enters a cycle edge and record or act on it.
+      const neighbor = cells[neighborId];
+
+      // Cycle → bridge: tag the first bridge cell with the current cycleId so a
+      // later walk entering this bridge can restore the correct cycle context on
+      // exit. Only tag if not already claimed by a previous walk.
+      if (cell.walked === 1 && neighbor.walked === 2 && neighbor.cycleId == null) {
+        neighbor.cycleId = currentCycleId;
+      }
+
+      // Bridge → cycle: decide which cycle we are entering.
+      //   Destination already labeled → reconnecting to a known cycle; restore its ID.
+      //   Destination unlabeled       → entering a new cycle; allocate a fresh ID.
+      if (cell.walked === 2 && neighbor.walked === 1) {
+        currentCycleId = neighbor.cycleId != null ? neighbor.cycleId : nextCycleId++;
+      }
+
+      // Start-cell present stop: when idA has not been removed, halt as soon as
+      // the walk crosses from a removed (invisible) cell to an active one.
+      // Assign cycleId before stopping so the destination is not left unlabeled.
+      if (startCellPresent && cell.isVisited && !neighbor.isVisited) {
+        if (neighbor.walked === 1 && neighbor.cycleId == null) {
+          neighbor.cycleId = currentCycleId;
+        }
+        done = true;
+        break;
+      }
 
       outIdx = (dirIdx + 1) % 4;
       if (firstExitDir === null) {
@@ -388,19 +439,20 @@ export function outerBoundaryWalkCycle(idA, idB, outsidePos) {
       everMoved = true;
       moved = true;
 
-      if (idA !== idB && currentId === idB) {
-        done = true;
-      } else if (!cells[idA].isVisited && !cells[currentId].isVisited) {
-        // Start cell is still present (non-invisible): stop at the first
-        // non-visited cell encountered.
-        // TODO: wire in the actual stop condition once cycle detection is defined.
+      // Assign cycleId to cycle cells that have not yet been labeled.
+      if (neighbor.walked === 1 && neighbor.cycleId == null) {
+        neighbor.cycleId = currentCycleId;
       }
+
+      if (idA !== idB && currentId === idB) done = true;
 
       break;
     }
 
     if (!moved && !done) break; // Dead end — should not occur on a valid boundary
   }
+
+  return nextCycleId;
 }
 
 /**
