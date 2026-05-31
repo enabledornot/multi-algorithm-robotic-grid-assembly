@@ -303,6 +303,107 @@ export function outerBoundaryWalk(idA, idB, outsidePos) {
 }
 
 /**
+ * Walks the outer boundary of the shape from cell idA to cell idB using the
+ * same left-hand rule traversal as outerBoundaryWalk, but uses data recorded
+ * by a previous walk to identify cycles in the graph.
+ *
+ * Termination:
+ *   - Full-loop (idA === idB): same condition as outerBoundaryWalk — stop when
+ *     the walker returns to idA and is about to retake the first step.
+ *   - Partial walk (idA !== idB): stop when idB is reached.
+ *   - Start-cell present: if idA still exists (isVisited === false), the walk
+ *     continues until the first non-visited (non-invisible) cell is encountered.
+ *
+ * Cycle detection logic is TODO — see inline stub.
+ *
+ * @param {number} idA - Start cell ID (assumed to be on the outer boundary)
+ * @param {number} idB - End cell ID (assumed to be on the outer boundary)
+ * @param {{ col: number, row: number }} outsidePos - An exterior (empty) cell
+ *   position adjacent to idA. Determines which side of the boundary is "outside"
+ *   and sets the initial walking orientation.
+ */
+export function outerBoundaryWalkCycle(idA, idB, outsidePos) {
+  // Direction helpers — identical to outerBoundaryWalk
+  function getNeighborId(cell, dirIdx) {
+    if (dirIdx === 0) return cell.up;
+    if (dirIdx === 1) return cell.right;
+    if (dirIdx === 2) return cell.down;
+    return cell.left;
+  }
+
+  function dirIndexFromDelta(dc, dr) {
+    if (dr < 0) return 0; // north
+    if (dc > 0) return 1; // east
+    if (dr > 0) return 2; // south
+    return 3;             // west
+  }
+
+  const startCell = cells[idA];
+  let outIdx = dirIndexFromDelta(
+    outsidePos.col - startCell.col,
+    outsidePos.row - startCell.row
+  );
+
+  const maxSteps = cells.length * 8 + 8;
+  let steps = 0;
+  let done                = false;
+  let everMoved           = false;
+  let firstExitDir        = null;
+  let firstStepNeighborId = null;
+
+  let currentId = idA;
+
+  while (!done && steps < maxSteps) {
+    steps++;
+    const cell = cells[currentId];
+
+    const priority = [
+      (outIdx + 2) % 4,
+      (outIdx + 3) % 4,
+      outIdx,
+      (outIdx + 1) % 4,
+    ];
+
+    let moved = false;
+    for (const dirIdx of priority) {
+      const neighborId = getNeighborId(cell, dirIdx);
+      if (neighborId === null) continue;
+
+      // Full-loop stop: back at start and about to retake the first step → done.
+      if (idA === idB && everMoved && currentId === idA && neighborId === firstStepNeighborId) {
+        done = true;
+        break;
+      }
+
+      // TODO: cycle detection — use data from the previous walk recorded on
+      // cells (e.g. walked counts, layer assignments) to identify when the
+      // traversal re-enters a cycle edge and record or act on it.
+
+      outIdx = (dirIdx + 1) % 4;
+      if (firstExitDir === null) {
+        firstExitDir        = dirIdx;
+        firstStepNeighborId = neighborId;
+      }
+      currentId = neighborId;
+      everMoved = true;
+      moved = true;
+
+      if (idA !== idB && currentId === idB) {
+        done = true;
+      } else if (!cells[idA].isVisited && !cells[currentId].isVisited) {
+        // Start cell is still present (non-invisible): stop at the first
+        // non-visited cell encountered.
+        // TODO: wire in the actual stop condition once cycle detection is defined.
+      }
+
+      break;
+    }
+
+    if (!moved && !done) break; // Dead end — should not occur on a valid boundary
+  }
+}
+
+/**
  * Remove the tail segment starting at tailCellId back to the nearest cycle.
  *
  * Starts with prevId=null so the tip cell's only unvisited neighbour (the next
