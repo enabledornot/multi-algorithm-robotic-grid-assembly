@@ -50,6 +50,10 @@ export class EventLog {
         this.events.push({ type: 'colorDot', col, row });
     }
 
+    labelCell(col, row, label) {
+        this.events.push({ type: 'labelCell', col, row, label });
+    }
+
     markComponent() {
         this.componentBoundaries.push(this.events.length);
     }

@@ -89,7 +89,7 @@ function drawCubes(cellColors, blackDots) {
     }
     g.rect(px, py, gridSize, gridSize);
     g.fill(color);
-    if (edgeData) {
+    if (edgeData && edgeData.algorithm !== 'outer-peel') {
       const dotKey = edgeData.flipped
         ? `${cube.y - edgeData.minY},${cube.x - edgeData.minX}`
         : `${cube.x - edgeData.minX},${cube.y - edgeData.minY}`;
@@ -199,12 +199,40 @@ function drawEdges(edges) {
 //   g.fill(c.color);
 // }
 
+// --- Draw cell labels ---
+function drawLabels(cellLabels) {
+  const container = new PIXI.Container();
+  if (!edgeData) return container;
+
+  const fontSize = Math.max(10, gridSize * 0.55);
+
+  cubes.forEach((cube) => {
+    const key = edgeData.flipped
+      ? `${cube.y - edgeData.minY},${cube.x - edgeData.minX}`
+      : `${cube.x - edgeData.minX},${cube.y - edgeData.minY}`;
+    const label = cellLabels[key];
+    if (label == null) return;
+
+    const text = new PIXI.Text({
+      text: String(label),
+      style: { fontSize, fill: 0x000000, fontWeight: 'bold' },
+    });
+    text.anchor.set(0.5, 0.5);
+    text.x = (cube.x + 0.5) * gridSize;
+    text.y = (cube.y + 0.5) * gridSize;
+    container.addChild(text);
+  });
+
+  return container;
+}
+
 // --- Main draw ---
 function draw() {
   world.removeChildren().forEach(child => child.destroy());
 
   // Replay event log up to current animation position
   const cellColors = {};
+  const cellLabels = {};
   const edges = [];
   const blackDots = new Set();
   if (edgeData && animState) {
@@ -215,16 +243,19 @@ function draw() {
       if (ev.type === 'updateCell') cellColors[`${ev.col},${ev.row}`] = ev.color;
       else if (ev.type === 'addEdge') edges.push(ev);
       else if (ev.type === 'colorDot') blackDots.add(`${ev.col},${ev.row}`);
+      else if (ev.type === 'labelCell') cellLabels[`${ev.col},${ev.row}`] = ev.label;
     }
   }
 
   const grid = drawGrid();
   const cubeGraphics = drawCubes(cellColors, blackDots);
   const edgeGraphics = drawEdges(edges);
+  const labelGraphics = drawLabels(cellLabels);
 
   world.addChild(grid);
   world.addChild(cubeGraphics);
   world.addChild(edgeGraphics);
+  world.addChild(labelGraphics);
 
   // Apply camera transform
   world.scale.set(camera.zoom);
@@ -429,8 +460,9 @@ function runAlgorithmWithStartVertex(gridX, gridY, autoPlay = true) {
     return;
   }
 
+  const algorithmMode = document.getElementById('algorithm-mode').value;
   const { eventLog, vcompCount } = getAlgorithmRunner()(matrix, { startX: matrixX, startY: matrixY });
-  edgeData = { eventLog, minX, minY, flipped: flipXY };
+  edgeData = { eventLog, minX, minY, flipped: flipXY, algorithm: algorithmMode };
   const vertCount = eventLog.events.filter(e => e.type === 'addEdge' && e.edgeType === 'vertical').length;
   const horzCount = eventLog.events.filter(e => e.type === 'addEdge' && e.edgeType === 'horizontal').length;
   appendOutput(`Vertical edges: ${vertCount}`);
@@ -629,8 +661,9 @@ function runAlgorithm(autoPlay = true) {
     return;
   }
 
+  const algorithmMode = document.getElementById('algorithm-mode').value;
   const { eventLog, vcompCount } = getAlgorithmRunner()(matrix);
-  edgeData = { eventLog, minX, minY, flipped: flipXY };
+  edgeData = { eventLog, minX, minY, flipped: flipXY, algorithm: algorithmMode };
   const vertCount = eventLog.events.filter(e => e.type === 'addEdge' && e.edgeType === 'vertical').length;
   const horzCount = eventLog.events.filter(e => e.type === 'addEdge' && e.edgeType === 'horizontal').length;
   appendOutput(`Vertical edges: ${vertCount}`);

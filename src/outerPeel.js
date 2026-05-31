@@ -20,6 +20,11 @@ function setCellColor(id, color) {
   eventLog.updateCell(cell.col, cell.row, color);
 }
 
+function setCellLabel(id, label) {
+  const cell = cells[id];
+  eventLog.labelCell(cell.col, cell.row, label);
+}
+
 /**
  * Remove a cell from the shape: marks it visited, emits a color event, and
  * appends its coordinates to the build order. Ignored if already removed.
@@ -128,6 +133,10 @@ function runPeelSweep() {
   const start = cells[0];
   const outsidePos = { col: start.col - 1, row: start.row };
   outerBoundaryWalk(0, 0, outsidePos);
+
+  // Second pass: assign cycleIds using walked counts from the first walk.
+  // Cell 0 and outsidePos are reused — the cycle walk follows the same path.
+  outerBoundaryWalkCycle(0, 0, outsidePos, 0);
 
   eventLog.markWavefront();
 }
@@ -366,6 +375,8 @@ export function outerBoundaryWalkCycle(idA, idB, outsidePos, startingCycleId) {
   // Assign cycleId to start cell if it is a cycle cell (walked === 1)
   if (startCell.walked === 1) {
     startCell.cycleId = currentCycleId;
+    setCellLabel(idA, currentCycleId);
+    eventLog.markComponent();
   }
 
   // Capture whether start cell is still active before the walk begins.
@@ -405,18 +416,28 @@ export function outerBoundaryWalkCycle(idA, idB, outsidePos, startingCycleId) {
 
       const neighbor = cells[neighborId];
 
-      // Cycle → bridge: tag the first bridge cell with the current cycleId so a
-      // later walk entering this bridge can restore the correct cycle context on
-      // exit. Only tag if not already claimed by a previous walk.
-      if (cell.walked === 1 && neighbor.walked === 2 && neighbor.cycleId == null) {
+      // Cycle → bridge: always stamp the bridge entry cell with the current
+      // cycleId. On the return trip (bridge → cycle), this is read back to
+      // restore the correct cycle context. Overwriting a previous tag is
+      // intentional — the most recent entry determines the active cycle.
+      if (cell.walked === 1 && neighbor.walked === 2) {
         neighbor.cycleId = currentCycleId;
       }
 
-      // Bridge → cycle: decide which cycle we are entering.
-      //   Destination already labeled → reconnecting to a known cycle; restore its ID.
-      //   Destination unlabeled       → entering a new cycle; allocate a fresh ID.
+      // Bridge → cycle: restore the cycle context saved on the bridge entry cell,
+      // or fall back to the destination cell's ID (reconnect) or a fresh allocation.
+      //   cell.cycleId != null → this bridge cell was tagged when we entered the
+      //     bridge from a cycle cell; restore that context (the "return trip" pick-up).
+      //   neighbor.cycleId != null → destination already labeled; reconnect to it.
+      //   otherwise → entering a previously unseen cycle; allocate a fresh ID.
       if (cell.walked === 2 && neighbor.walked === 1) {
-        currentCycleId = neighbor.cycleId != null ? neighbor.cycleId : nextCycleId++;
+        if (cell.cycleId != null) {
+          currentCycleId = cell.cycleId;
+        } else if (neighbor.cycleId != null) {
+          currentCycleId = neighbor.cycleId;
+        } else {
+          currentCycleId = nextCycleId++;
+        }
       }
 
       // Start-cell present stop: when idA has not been removed, halt as soon as
@@ -425,6 +446,8 @@ export function outerBoundaryWalkCycle(idA, idB, outsidePos, startingCycleId) {
       if (startCellPresent && cell.isVisited && !neighbor.isVisited) {
         if (neighbor.walked === 1 && neighbor.cycleId == null) {
           neighbor.cycleId = currentCycleId;
+          setCellLabel(neighborId, currentCycleId);
+          eventLog.markComponent();
         }
         done = true;
         break;
@@ -442,6 +465,8 @@ export function outerBoundaryWalkCycle(idA, idB, outsidePos, startingCycleId) {
       // Assign cycleId to cycle cells that have not yet been labeled.
       if (neighbor.walked === 1 && neighbor.cycleId == null) {
         neighbor.cycleId = currentCycleId;
+        setCellLabel(neighborId, currentCycleId);
+        eventLog.markComponent();
       }
 
       if (idA !== idB && currentId === idB) done = true;
