@@ -485,11 +485,18 @@ export function outerBoundaryWalkCycle(idA, idB, outsidePos, startingCycleId) {
   // recorded alongside the cell id so peelCorner can later re-walk starting
   // from the correct predecessor, in the correct clockwise direction — the
   // corner's two active neighbours alone don't say which is which.
+  //
+  // entryDir is recorded too: once the corner is removed, resuming the walk
+  // from prevId needs the SAME orientation the corner itself had established
+  // ((entryDir + 1) % 4), not one re-derived from prevId's own geometry —
+  // prevId can have other exterior sides of its own (e.g. its original edge
+  // of the shape) that would send a freshly-derived orientation the wrong
+  // way, back into unrelated interior structure instead of forward.
   function checkCorner(cellId, cell, dirIdx) {
     if (entryDir !== null && cell.walked === 1 && dirIdx === (entryDir + 1) % 4) {
       const prevId = getNeighborId(cell, (entryDir + 2) % 4);
       const nextId = getNeighborId(cell, dirIdx);
-      const record = { cellId, prevId, nextId, cycleId: currentCycleId };
+      const record = { cellId, prevId, nextId, cycleId: currentCycleId, entryDir };
       getOrCreateCycle(currentCycleId).cornerNodeIndices.push(record);
       cornerQueue.push(record);
       setCellColor(cellId, COLOR_CORNER);
@@ -623,9 +630,13 @@ export function outerBoundaryWalkCycle(idA, idB, outsidePos, startingCycleId) {
  * walk — prevId is upstream of the corner in the original clockwise walk, so
  * starting there and walking forward is what actually finds a newly exposed
  * shortcut, rather than heading off the other way around the old boundary.
- * The corner's own former position is a known exterior point adjacent to
- * prevId, which is enough to orient the walk (per outerBoundaryWalkCycle's
- * outsidePos convention).
+ *
+ * The walk's starting orientation reuses the corner's own — (entryDir + 1) %
+ * 4 — rather than deriving one from the corner's grid position. prevId can
+ * have its own unrelated exterior sides (e.g. an original edge of the shape),
+ * and orienting from raw position picks up on those instead, sending the
+ * walk into unrelated interior structure instead of forward through the
+ * newly exposed edge.
  *
  * Tail detection is intentionally not handled here yet; this only exercises
  * the bounded walk / walked-count mechanics for newly exposed cells.
@@ -635,14 +646,17 @@ export function outerBoundaryWalkCycle(idA, idB, outsidePos, startingCycleId) {
  * active) — the queue can hold stale or duplicate entries left over from
  * other peels since it isn't pruned as the shape changes.
  *
- * @param {{cellId: number, prevId: number, nextId: number, cycleId: number}} corner
+ * @param {{cellId: number, prevId: number, nextId: number, cycleId: number, entryDir: number}} corner
  *   - An entry from cornerQueue or cycles[cycleId].cornerNodeIndices
  * @returns {number} The next available cycle ID after this walk completes.
  */
 export function peelCorner(corner) {
-  const { cellId, prevId, nextId, cycleId } = corner;
-  const cornerCell = cells[cellId];
-  const outsidePos = { col: cornerCell.col, row: cornerCell.row };
+  const { cellId, prevId, nextId, cycleId, entryDir } = corner;
+  const prevCell = cells[prevId];
+  const outIdx = (entryDir + 1) % 4;
+  const dc = outIdx === 1 ? 1 : outIdx === 3 ? -1 : 0;
+  const dr = outIdx === 2 ? 1 : outIdx === 0 ? -1 : 0;
+  const outsidePos = { col: prevCell.col + dc, row: prevCell.row + dr };
 
   removeFromShape(cellId);
 
