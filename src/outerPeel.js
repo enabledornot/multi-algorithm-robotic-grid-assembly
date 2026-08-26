@@ -3,6 +3,13 @@ import { EventLog } from './lib.js';
 const cells = [];
 const buildOrder = []; // ordered list of { col, row } — cells in assembly sequence
 const cycles = []; // cycle structs indexed by cycleId
+// Flat worklist of every corner found, across all cycles — a cycle made entirely
+// of straight/bridge cells can end up with an empty cornerNodeIndices of its own,
+// so peeling can't rely on per-cycle lists alone. Entries can go stale (a cell's
+// corner status, or even its presence, can change after other corners get
+// peeled) or duplicate (a later bounded walk can re-cross an already-found
+// corner) — whoever consumes this queue has to recheck before acting on it.
+const cornerQueue = [];
 let eventLog;
 
 const COLOR_ADDED        = 0xFFB3B3; // light red
@@ -15,6 +22,7 @@ function reset() {
   cells.length = 0;
   buildOrder.length = 0;
   cycles.length = 0;
+  cornerQueue.length = 0;
   eventLog = new EventLog();
 }
 
@@ -472,9 +480,18 @@ export function outerBoundaryWalkCycle(idA, idB, outsidePos, startingCycleId) {
   // turning clockwise relative to how it arrived (exitDir = entryDir + 1).
   // A straight-through cell keeps exitDir === entryDir; a reflex (concave)
   // turn would be entryDir - 1 and is deliberately not marked as a corner.
+  //
+  // prevId/nextId (the neighbours the walker arrived from / is heading to) are
+  // recorded alongside the cell id so peelCorner can later re-walk starting
+  // from the correct predecessor, in the correct clockwise direction — the
+  // corner's two active neighbours alone don't say which is which.
   function checkCorner(cellId, cell, dirIdx) {
     if (entryDir !== null && cell.walked === 1 && dirIdx === (entryDir + 1) % 4) {
-      getOrCreateCycle(currentCycleId).cornerNodeIndices.push(cellId);
+      const prevId = getNeighborId(cell, (entryDir + 2) % 4);
+      const nextId = getNeighborId(cell, dirIdx);
+      const record = { cellId, prevId, nextId, cycleId: currentCycleId };
+      getOrCreateCycle(currentCycleId).cornerNodeIndices.push(record);
+      cornerQueue.push(record);
       setCellColor(cellId, COLOR_CORNER);
       eventLog.markComponent();
     }
@@ -570,6 +587,15 @@ export function outerBoundaryWalkCycle(idA, idB, outsidePos, startingCycleId) {
       everMoved = true;
       moved = true;
 
+      // Fresh cell (walked === 0): never touched by any prior walk — this walk
+      // is establishing it as a cycle cell for the first time, so its walked
+      // count has to be derived here rather than looked up from an earlier pass.
+      if (neighbor.walked === 0) {
+        neighbor.walked = 1;
+        setCellColor(neighborId, COLOR_WALKED_ONCE);
+        eventLog.markComponent();
+      }
+
       // Assign cycleId to cycle cells that have not yet been labeled.
       if (neighbor.walked === 1 && neighbor.cycleId == null) {
         neighbor.cycleId = currentCycleId;
@@ -586,6 +612,41 @@ export function outerBoundaryWalkCycle(idA, idB, outsidePos, startingCycleId) {
   }
 
   return nextCycleId;
+}
+
+/**
+ * Remove one corner cell from a cycle and walk the newly exposed edge back
+ * around to reconnect with the rest of the cycle.
+ *
+ * The corner's prevId/nextId (recorded by checkCorner when the corner was
+ * found) give the correct start/end points and direction for the bounded
+ * walk — prevId is upstream of the corner in the original clockwise walk, so
+ * starting there and walking forward is what actually finds a newly exposed
+ * shortcut, rather than heading off the other way around the old boundary.
+ * The corner's own former position is a known exterior point adjacent to
+ * prevId, which is enough to orient the walk (per outerBoundaryWalkCycle's
+ * outsidePos convention).
+ *
+ * Tail detection is intentionally not handled here yet; this only exercises
+ * the bounded walk / walked-count mechanics for newly exposed cells.
+ *
+ * Callers pulling from cornerQueue rather than a fresh checkCorner call must
+ * recheck the entry first (cellId not already visited, prevId/nextId still
+ * active) — the queue can hold stale or duplicate entries left over from
+ * other peels since it isn't pruned as the shape changes.
+ *
+ * @param {{cellId: number, prevId: number, nextId: number, cycleId: number}} corner
+ *   - An entry from cornerQueue or cycles[cycleId].cornerNodeIndices
+ * @returns {number} The next available cycle ID after this walk completes.
+ */
+export function peelCorner(corner) {
+  const { cellId, prevId, nextId, cycleId } = corner;
+  const cornerCell = cells[cellId];
+  const outsidePos = { col: cornerCell.col, row: cornerCell.row };
+
+  removeFromShape(cellId);
+
+  return outerBoundaryWalkCycle(prevId, nextId, outsidePos, cycleId);
 }
 
 /**
@@ -668,5 +729,5 @@ export function runAlgorithm(matrix, _options = {}) {
   computePeelLayers();
   runPeelSweep();
   const stats = computeStats();
-  return { eventLog, vcompCount: cells.length, stats, cells: [...cells], buildOrder: [...buildOrder] };
+  return { eventLog, vcompCount: cells.length, stats, cells: [...cells], buildOrder: [...buildOrder], cycles: [...cycles], cornerQueue: [...cornerQueue] };
 }
