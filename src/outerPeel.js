@@ -224,7 +224,35 @@ function runPeelSweep() {
     outerBoundaryWalkCycle(cycleStart.id, cycleStart.id, cycleStart.outsidePos, 0);
   }
 
+  drainCornerQueue();
+
   eventLog.markWavefront();
+}
+
+/**
+ * Repeatedly peel corners from cornerQueue until none remain.
+ *
+ * Tail removal isn't wired into the bounded re-walk yet, so this is only the
+ * corner-peeling half of the algorithm — once a cycle degenerates down to
+ * cells with no corners left, whatever remains is simply left untouched for
+ * now rather than swept up as a tail.
+ *
+ * Entries can be stale (their cell, or one of its former neighbours, may
+ * already be gone by the time they're reached) or duplicated (a later
+ * bounded walk can re-cross an already-found corner) — both are discarded
+ * here rather than acted on. A cell's active-neighbour set can only shrink
+ * over time (removals are permanent, never undone), so if cellId/prevId/
+ * nextId are all still present the entry is still a valid corner — no
+ * further geometric recheck is needed beyond that.
+ */
+function drainCornerQueue() {
+  while (cornerQueue.length > 0) {
+    const corner = cornerQueue.shift();
+    if (cells[corner.cellId].isVisited) continue;
+    if (cells[corner.prevId].isVisited) continue;
+    if (cells[corner.nextId].isVisited) continue;
+    peelCorner(corner);
+  }
 }
 
 /**
@@ -431,9 +459,15 @@ export function outerBoundaryWalk(idA, idB, outsidePos) {
  * @param {{ col: number, row: number }} outsidePos - Exterior position adjacent
  *   to idA; sets the initial outside direction.
  * @param {number} startingCycleId  - The cycle ID to begin with.
+ * @param {number|null} [initialEntryDir] - The entryDir idA should be treated
+ *   as having arrived by, for corner-checking its own first move. Needed by
+ *   peelCorner (which resumes a walk mid-boundary, at a cell that may itself
+ *   have just become a new corner) — leave null for a fresh/global walk
+ *   starting at a genuine boundary origin, where idA's own corner status (if
+ *   any) is handled separately via the full-loop-stop special case.
  * @returns {number} The next available cycle ID after this walk completes.
  */
-export function outerBoundaryWalkCycle(idA, idB, outsidePos, startingCycleId) {
+export function outerBoundaryWalkCycle(idA, idB, outsidePos, startingCycleId, initialEntryDir = null) {
   // Direction helpers — identical to outerBoundaryWalk
   function getNeighborId(cell, dirIdx) {
     if (dirIdx === 0) return cell.up;
@@ -466,13 +500,22 @@ export function outerBoundaryWalkCycle(idA, idB, outsidePos, startingCycleId) {
     eventLog.markComponent();
   }
 
+  // Distinguishes the two ways this function gets called. The global pass-2
+  // walk (initialEntryDir === null) only ever touches cells pass 1 already
+  // walked once — it must not treat that as "being revisited right now," or
+  // every cell would immediately look like a bridge. A peel's resumed walk
+  // (initialEntryDir !== null) is different: any cell already at walked
+  // === 1 here genuinely is being visited a second time, by this walk on
+  // top of whatever set it to 1 earlier — real bridge-forming behaviour.
+  const isPeelContinuation = initialEntryDir !== null;
+
   const maxSteps = cells.length * 8 + 8;
   let steps = 0;
   let done                = false;
   let everMoved           = false;
   let firstExitDir        = null;
   let firstStepNeighborId = null;
-  let entryDir            = null; // move direction that brought the walker to the current cell
+  let entryDir            = initialEntryDir; // move direction that brought the walker to the current cell
 
   let currentId = idA;
 
@@ -495,6 +538,14 @@ export function outerBoundaryWalkCycle(idA, idB, outsidePos, startingCycleId) {
   function checkCorner(cellId, cell, dirIdx) {
     if (entryDir !== null && cell.walked === 1 && dirIdx === (entryDir + 1) % 4) {
       const prevId = getNeighborId(cell, (entryDir + 2) % 4);
+      // A genuine corner needs a real, still-active predecessor on the
+      // reverse side. For a normal (unseeded) walk entryDir always reflects
+      // a move just taken, so this is guaranteed — but for idA of a peel's
+      // resumed walk, entryDir is inherited/synthetic rather than a real
+      // move, so idA can fail this (e.g. it became a dead end, not a corner,
+      // once its neighbour was peeled) even though the exit-direction check
+      // above matched.
+      if (prevId === null || cells[prevId].isVisited) return;
       const nextId = getNeighborId(cell, dirIdx);
       const record = { cellId, prevId, nextId, cycleId: currentCycleId, entryDir };
       getOrCreateCycle(currentCycleId).cornerNodeIndices.push(record);
@@ -556,6 +607,7 @@ export function outerBoundaryWalkCycle(idA, idB, outsidePos, startingCycleId) {
       }
 
       const neighbor = cells[neighborId];
+      const neighborWalkedBefore = neighbor.walked; // snapshot before this arrival updates it
 
       checkCorner(currentId, cell, dirIdx);
 
@@ -594,12 +646,33 @@ export function outerBoundaryWalkCycle(idA, idB, outsidePos, startingCycleId) {
       everMoved = true;
       moved = true;
 
-      // Fresh cell (walked === 0): never touched by any prior walk — this walk
-      // is establishing it as a cycle cell for the first time, so its walked
-      // count has to be derived here rather than looked up from an earlier pass.
-      if (neighbor.walked === 0) {
+      // Track walked count for this arrival, mirroring outerBoundaryWalk's
+      // unconditional per-arrival increment (pass 1 has no such gap — every
+      // visit counts, and bridge cells simply fall out of cells that end up
+      // visited twice). Here that history is spread across separate peels
+      // instead of one continuous walk, so it has to be derived as each
+      // arrival happens rather than looked up from a single earlier pass:
+      //   - walked === 0 (never touched by any pass): first visit — becomes
+      //     a cycle cell.
+      //   - walked === 1 (already established, by pass 1 or an earlier
+      //     peel): this is a second visit — becomes a bridge, same as it
+      //     would have if both visits had happened within one continuous
+      //     walk. Stamp its cycleId while cell is still a plain cycle cell
+      //     (walked === 1), mirroring the cycle → bridge case above for a
+      //     bridge that's only becoming one right now.
+      //   - walked >= 2: already a bridge; left alone.
+      // The walked === 1 case only applies to a peel's resumed walk — during
+      // the global pass-2 walk every cell already starts at walked === 1
+      // (set by pass 1), so treating that as "a second visit" there would
+      // immediately turn the entire cycle into bridges.
+      if (neighborWalkedBefore === 0) {
         neighbor.walked = 1;
         setCellColor(neighborId, COLOR_WALKED_ONCE);
+        eventLog.markComponent();
+      } else if (isPeelContinuation && neighborWalkedBefore === 1) {
+        neighbor.walked = 2;
+        if (cell.walked === 1) neighbor.cycleId = currentCycleId;
+        setCellColor(neighborId, COLOR_WALKED_TWICE);
         eventLog.markComponent();
       }
 
@@ -660,7 +733,7 @@ export function peelCorner(corner) {
 
   removeFromShape(cellId);
 
-  return outerBoundaryWalkCycle(prevId, nextId, outsidePos, cycleId);
+  return outerBoundaryWalkCycle(prevId, nextId, outsidePos, cycleId, entryDir);
 }
 
 /**
