@@ -2,17 +2,30 @@ import { EventLog } from './lib.js';
 
 const cells = [];
 const buildOrder = []; // ordered list of { col, row } — cells in assembly sequence
+const cycles = []; // cycle structs indexed by cycleId
 let eventLog;
 
 const COLOR_ADDED        = 0xFFB3B3; // light red
 const COLOR_WALKED_ONCE  = 0xFFA500; // orange — first time walked
 const COLOR_WALKED_TWICE = 0x9B59B6; // purple — second time walked
 const COLOR_REMOVED      = 0x2ECC71; // green  — removed from shape / placed in build order
+const COLOR_CORNER       = 0xF1C40F; // yellow — convex corner vertex on the outer cycle
 
 function reset() {
   cells.length = 0;
   buildOrder.length = 0;
+  cycles.length = 0;
   eventLog = new EventLog();
+}
+
+/**
+ * Return the cycle struct for cycleId, creating it on first use.
+ */
+function getOrCreateCycle(cycleId) {
+  if (cycles[cycleId] === undefined) {
+    cycles[cycleId] = { isActive: true, cornerNodeIndices: [] };
+  }
+  return cycles[cycleId];
 }
 
 function setCellColor(id, color) {
@@ -436,6 +449,7 @@ export function outerBoundaryWalkCycle(idA, idB, outsidePos, startingCycleId) {
 
   let currentCycleId   = startingCycleId;
   let nextCycleId      = startingCycleId + 1;
+  getOrCreateCycle(currentCycleId);
 
   // Assign cycleId to start cell if it is a cycle cell (walked === 1)
   if (startCell.walked === 1) {
@@ -450,8 +464,21 @@ export function outerBoundaryWalkCycle(idA, idB, outsidePos, startingCycleId) {
   let everMoved           = false;
   let firstExitDir        = null;
   let firstStepNeighborId = null;
+  let entryDir            = null; // move direction that brought the walker to the current cell
 
   let currentId = idA;
+
+  // Convex corner: cell is a cycle cell (walked === 1) and the walker is
+  // turning clockwise relative to how it arrived (exitDir = entryDir + 1).
+  // A straight-through cell keeps exitDir === entryDir; a reflex (concave)
+  // turn would be entryDir - 1 and is deliberately not marked as a corner.
+  function checkCorner(cellId, cell, dirIdx) {
+    if (entryDir !== null && cell.walked === 1 && dirIdx === (entryDir + 1) % 4) {
+      getOrCreateCycle(currentCycleId).cornerNodeIndices.push(cellId);
+      setCellColor(cellId, COLOR_CORNER);
+      eventLog.markComponent();
+    }
+  }
 
   // Pre-seek: if the start cell is present but unlabeled (it is a bridge cell),
   // take one step to its first active neighbour. This marks the start cell as
@@ -473,6 +500,7 @@ export function outerBoundaryWalkCycle(idA, idB, outsidePos, startingCycleId) {
       firstStepNeighborId = neighborId;
       currentId           = neighborId;
       everMoved           = true;
+      entryDir            = dirIdx;
       break;
     }
   }
@@ -495,12 +523,17 @@ export function outerBoundaryWalkCycle(idA, idB, outsidePos, startingCycleId) {
       if (cells[neighborId].isVisited) continue; // treat removed cells as non-existent
 
       // Full-loop stop: back at start and about to retake the first step → done.
+      // Check the start cell's own corner status here too — it never gets a
+      // "normal" iteration of its own once the walk is about to close the loop.
       if (idA === idB && everMoved && currentId === idA && neighborId === firstStepNeighborId) {
+        checkCorner(currentId, cell, dirIdx);
         done = true;
         break;
       }
 
       const neighbor = cells[neighborId];
+
+      checkCorner(currentId, cell, dirIdx);
 
       // Cycle → bridge: always stamp the bridge entry cell with the current
       // cycleId. On the return trip (bridge → cycle), this is read back to
@@ -523,6 +556,7 @@ export function outerBoundaryWalkCycle(idA, idB, outsidePos, startingCycleId) {
           currentCycleId = neighbor.cycleId;
         } else {
           currentCycleId = nextCycleId++;
+          getOrCreateCycle(currentCycleId);
         }
       }
 
@@ -531,6 +565,7 @@ export function outerBoundaryWalkCycle(idA, idB, outsidePos, startingCycleId) {
         firstExitDir        = dirIdx;
         firstStepNeighborId = neighborId;
       }
+      entryDir  = dirIdx;
       currentId = neighborId;
       everMoved = true;
       moved = true;
