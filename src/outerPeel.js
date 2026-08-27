@@ -232,11 +232,6 @@ function runPeelSweep() {
 /**
  * Repeatedly peel corners from cornerQueue until none remain.
  *
- * Tail removal isn't wired into the bounded re-walk yet, so this is only the
- * corner-peeling half of the algorithm — once a cycle degenerates down to
- * cells with no corners left, whatever remains is simply left untouched for
- * now rather than swept up as a tail.
- *
  * Entries can be stale (their cell, or one of its former neighbours, may
  * already be gone by the time they're reached) or duplicated (a later
  * bounded walk can re-cross an already-found corner) — both are discarded
@@ -302,7 +297,7 @@ export function outerBoundaryWalk(idA, idB, outsidePos) {
   }
 
   let currentId = idA;
-  cells[currentId].walked++;
+  if (cells[currentId].walked < 2) cells[currentId].walked++;
   emitWalked(currentId);
 
   // Left-hand rule (CW traversal, outside on right):
@@ -344,6 +339,7 @@ export function outerBoundaryWalk(idA, idB, outsidePos) {
     for (const dirIdx of priority) {
       const neighborId = getNeighborId(cell, dirIdx);
       if (neighborId === null) continue;
+      if (cells[neighborId].isVisited) continue; // treat removed cells as non-existent
 
       // Full-loop stop: back at start and about to retake the first step → done.
       // Resolve any pending tail before stopping so it is not abandoned.
@@ -362,7 +358,7 @@ export function outerBoundaryWalk(idA, idB, outsidePos) {
       // is the cell we are at right now before moving, stored as pendingTailFromId
       // so handleTail knows which direction leads back to the boundary.
       if (entryDir !== null && dirIdx === (entryDir + 2) % 4) {
-        cells[currentId].walked++;
+        if (cells[currentId].walked < 2) cells[currentId].walked++;
         emitWalked(currentId);
         pendingTailId     = currentId;
         pendingTailFromId = getNeighborId(cells[currentId], (entryDir + 2) % 4); // the cell we came from
@@ -375,6 +371,12 @@ export function outerBoundaryWalk(idA, idB, outsidePos) {
         handleTail(pendingTailId, pendingTailFromId);
         pendingTailId     = null;
         pendingTailFromId = null;
+        // handleTail's own inward chain-following can reach and remove
+        // neighborId itself (it's retracing the same path this walk is on).
+        // Stepping onto it anyway would re-increment/recolor a cell that
+        // was just correctly marked removed — treat it as gone, same as if
+        // it had been null or already visited from the start.
+        if (cells[neighborId].isVisited) continue;
       }
 
       outIdx = (dirIdx + 1) % 4;
@@ -393,13 +395,13 @@ export function outerBoundaryWalk(idA, idB, outsidePos) {
         // startFromId is the cell we stepped from to get back to idA, giving
         // handleTail the correct boundary-side neighbour to use as prevId.
         if (dirIdx === (firstExitDir + 2) % 4) {
-          cells[currentId].walked++;
+          if (cells[currentId].walked < 2) cells[currentId].walked++;
           emitWalked(currentId);
           startSameSideReturn = true;
           startFromId = getNeighborId(cells[currentId], (firstExitDir + 2) % 4); // boundary-side neighbour of idA (opposite of first exit)
         }
       } else {
-        cells[currentId].walked++;
+        if (cells[currentId].walked < 2) cells[currentId].walked++;
         emitWalked(currentId);
 
         // Partial-walk stop: reached the target cell
@@ -408,7 +410,18 @@ export function outerBoundaryWalk(idA, idB, outsidePos) {
       break;
     }
 
-    if (!moved && !done) break; // Dead end — should not occur on a valid boundary
+    // Dead end: no candidate direction at all (all null or already removed) —
+    // not even a reversal to trigger the turnaround detection above, which
+    // only fires for a candidate that actually gets tried. This is how a
+    // fully isolated cell (zero active neighbours, e.g. idA itself with
+    // nothing left around it) shows up: everMoved never becomes true, so
+    // neither the turnaround/pendingTail tracking nor the startSameSideReturn
+    // check below ever gets a chance to run. handleTail only needs a
+    // starting cell id, so it can be reused directly here too.
+    if (!moved && !done) {
+      handleTail(currentId, null);
+      break;
+    }
   }
 
   // Resolve any pending tail that was not dispatched during the loop.
@@ -488,6 +501,20 @@ export function outerBoundaryWalkCycle(idA, idB, outsidePos, startingCycleId, in
     outsidePos.col - startCell.col,
     outsidePos.row - startCell.row
   );
+
+  // Cells whose walked count THIS walk itself bumps up to 2 (a real second
+  // visit happening within this exact pass). Passed to handleTail so its
+  // "undo the artifact" decrement only ever fires for a bump this walk is
+  // actually responsible for — never for a walked === 2 that already existed
+  // before this walk touched the cell (e.g. a legitimate bridge established
+  // by an earlier, unrelated peel; a stale corner record, see peelCorner/
+  // drainCornerQueue doc comments, can hand this walk a prevId/nextId that's
+  // already sitting at walked === 2 for exactly that reason). Removal itself
+  // stays unconditional either way — a cell down to a single remaining active
+  // neighbour is a genuine dangling tail regardless of how its walked count
+  // got set; only the decrement (which edits a cell's history rather than its
+  // current connectivity) needs this attribution check.
+  const bumpedToTwoThisWalk = new Set();
 
   let currentCycleId   = startingCycleId;
   let nextCycleId      = startingCycleId + 1;
@@ -636,6 +663,8 @@ export function outerBoundaryWalkCycle(idA, idB, outsidePos, startingCycleId, in
         }
       }
 
+      const isFirstMove = !everMoved; // true only while cell is still idA itself
+
       outIdx = (dirIdx + 1) % 4;
       if (firstExitDir === null) {
         firstExitDir        = dirIdx;
@@ -646,31 +675,42 @@ export function outerBoundaryWalkCycle(idA, idB, outsidePos, startingCycleId, in
       everMoved = true;
       moved = true;
 
-      // Track walked count for this arrival, mirroring outerBoundaryWalk's
-      // unconditional per-arrival increment (pass 1 has no such gap — every
-      // visit counts, and bridge cells simply fall out of cells that end up
-      // visited twice). Here that history is spread across separate peels
-      // instead of one continuous walk, so it has to be derived as each
-      // arrival happens rather than looked up from a single earlier pass:
+      // idA never gets an "arrival" of its own within this walk to increment
+      // its walked count the way every other cell does on the move that
+      // reaches it — it's where the walk resumes, not somewhere stepped
+      // onto. Bump it here instead, once, on the first move away from it,
+      // using the same already-1-becomes-a-bridge rule as any other revisit.
+      // This has to happen only now, after checkCorner and the transition
+      // checks above already read cell.walked for this exact move — bumping
+      // it any earlier would stop checkCorner from ever finding idA itself
+      // as a new corner (e.g. cases like (3,0) in a peeled 5x5 square).
+      // idA's cycleId is already set from the top of this function, so
+      // unlike the neighbor case below there's no cycleId to stamp here.
+      if (isPeelContinuation && isFirstMove && cell.walked === 1) {
+        cell.walked = 2;
+        bumpedToTwoThisWalk.add(cell.id);
+        setCellColor(cell.id, COLOR_WALKED_TWICE);
+        eventLog.markComponent();
+      }
+
+      // Track walked count for this arrival, same rule as idA above:
       //   - walked === 0 (never touched by any pass): first visit — becomes
       //     a cycle cell.
       //   - walked === 1 (already established, by pass 1 or an earlier
-      //     peel): this is a second visit — becomes a bridge, same as it
-      //     would have if both visits had happened within one continuous
-      //     walk. Stamp its cycleId while cell is still a plain cycle cell
-      //     (walked === 1), mirroring the cycle → bridge case above for a
-      //     bridge that's only becoming one right now.
+      //     peel), during a peel's resumed walk: a second visit — becomes a
+      //     bridge, exactly as it would if both visits happened within one
+      //     continuous walk. Only meaningful in peel-continuation mode — for
+      //     the original global walk every cell already starts at walked
+      //     === 1 (set by pass 1), so treating that as "a second visit"
+      //     there would immediately turn the whole cycle into bridges.
       //   - walked >= 2: already a bridge; left alone.
-      // The walked === 1 case only applies to a peel's resumed walk — during
-      // the global pass-2 walk every cell already starts at walked === 1
-      // (set by pass 1), so treating that as "a second visit" there would
-      // immediately turn the entire cycle into bridges.
       if (neighborWalkedBefore === 0) {
         neighbor.walked = 1;
         setCellColor(neighborId, COLOR_WALKED_ONCE);
         eventLog.markComponent();
       } else if (isPeelContinuation && neighborWalkedBefore === 1) {
         neighbor.walked = 2;
+        bumpedToTwoThisWalk.add(neighborId);
         if (cell.walked === 1) neighbor.cycleId = currentCycleId;
         setCellColor(neighborId, COLOR_WALKED_TWICE);
         eventLog.markComponent();
@@ -688,7 +728,47 @@ export function outerBoundaryWalkCycle(idA, idB, outsidePos, startingCycleId, in
       break;
     }
 
-    if (!moved && !done) break; // Dead end — should not occur on a valid boundary
+    // Dead end: no candidate direction is left (all null or already removed).
+    // Unlike outerBoundaryWalk, this walk has no inline turnaround/pendingTail
+    // tracking of its own — but handleTail only needs a starting cell id, and
+    // already correctly handles both an isolated single cell (forward.length
+    // === 0 → remove and stop) and a longer dangling chain (removes back to
+    // the nearest real junction/cycle cell), so it can be reused as-is here.
+    if (!moved && !done) {
+      handleTail(currentId, null, bumpedToTwoThisWalk);
+      break;
+    }
+  }
+
+  // Removing the corner that led to this walk can leave either (or both) of
+  // its former neighbours — idA and idB here — down to a single remaining
+  // active neighbour: three exterior sides, the same shape a tail tip has.
+  // Neither one gets discovered by the walk above on its own: idA is where
+  // the walk starts and moves away from, idB is just where it stops, and
+  // walking forward from a dead end toward a still-reachable target never
+  // forces the reversal the mid-walk turnaround detection depends on.
+  //
+  // handleTail only needs each endpoint's current walked count to already
+  // be correct, which it now is: idA got bumped by the "isFirstMove" branch
+  // above, and idB (like every other cell along the way) got bumped by the
+  // arrival-tracking branch, on the very same pass that just finished — no
+  // separate walk or extra bookkeeping needed. If an endpoint really is
+  // down to one neighbour, handleTail walks the whole chain inward from
+  // there and removes it — a cell down to one active neighbour is a genuine
+  // dangling tail regardless of how its walked count got set, so this part
+  // stays unconditional. If it's still a genuine junction, handleTail's own
+  // forward.length >= 2 check leaves it alone; bumpedToTwoThisWalk (passed
+  // through) tells it whether restoring the walked count to 1 is warranted
+  // — see that Set's own comment above for why an endpoint's walked === 2
+  // can predate this walk entirely (a stale corner record) and must not be
+  // "undone" as if this walk's own retrace had just created it.
+  //
+  // Only meaningful for a peel's resumed walk — the global pass-2 walk's
+  // idA/idB are already guaranteed stable, since pass 1 already resolved
+  // every tail in the whole shape before pass 2 ever runs.
+  if (isPeelContinuation) {
+    handleTail(idA, null, bumpedToTwoThisWalk);
+    if (idB !== idA) handleTail(idB, null, bumpedToTwoThisWalk);
   }
 
   return nextCycleId;
@@ -711,8 +791,10 @@ export function outerBoundaryWalkCycle(idA, idB, outsidePos, startingCycleId, in
  * walk into unrelated interior structure instead of forward through the
  * newly exposed edge.
  *
- * Tail detection is intentionally not handled here yet; this only exercises
- * the bounded walk / walked-count mechanics for newly exposed cells.
+ * Calls only outerBoundaryWalkCycle, which now handles walked-tracking, real
+ * tail detection at both idA and idB, and cycle/corner labelling all in one
+ * pass (see its own doc comment) — no separate walk or degree-based
+ * pre-check is needed here for this bounded span.
  *
  * Callers pulling from cornerQueue rather than a fresh checkCorner call must
  * recheck the entry first (cellId not already visited, prevId/nextId still
@@ -755,10 +837,21 @@ export function peelCorner(corner) {
  *
  * @param {number} tailCellId  - The turnaround cell where the tail begins
  * @param {number} _fromId     - Retained for call-site documentation; not used
+ * @param {Set<number>|null} [attributedIds] - Cell IDs whose walked === 2 the
+ *   calling walk is itself responsible for. When provided, the junction-stop
+ *   decrement below only fires for a cell in this set — otherwise a walked
+ *   count that predates the calling walk (e.g. a legitimate bridge from an
+ *   earlier, unrelated peel) would get wrongly "undone." Omit (or pass null)
+ *   for callers where every cell handleTail can reach was necessarily just
+ *   created by this same call — true for outerBoundaryWalk's original global
+ *   pass, where nothing has been peeled yet and no pre-existing state exists.
  */
-function handleTail(tailCellId, _fromId) {
-  let prevId    = null;
-  let currentId = tailCellId;
+function handleTail(tailCellId, _fromId, attributedIds = null) {
+  if (cells[tailCellId].isVisited) return; // already removed by an earlier call — nothing to do
+
+  let prevId     = null;
+  let currentId  = tailCellId;
+  let removedAny = false; // true once a real tail cell (not just the stop point) has been pruned
 
   while (true) {
     const cell = cells[currentId];
@@ -773,17 +866,31 @@ function handleTail(tailCellId, _fromId) {
 
     if (cell.walked < 2 || forward.length >= 2) {
       // Cycle cell (walked once) or junction (multiple active forward paths) — stop without removing.
-      // If walked >= 2, the extra count is an artifact of the boundary walker re-entering this
-      // cell when exiting the tail. Undo it so the cell reflects its true walk count.
-      if (cell.walked >= 2) {
+      // If walked >= 2, the extra count is usually an artifact of the boundary walker re-entering
+      // this cell when exiting the tail — undo it so the cell reflects its true walk count. But
+      // only if attributedIds says this call's own walk is what produced that count; otherwise it
+      // predates this call (e.g. an already-legitimate bridge) and must be left alone.
+      if (cell.walked >= 2 && (attributedIds === null || attributedIds.has(currentId))) {
         cells[currentId].walked--;
         setCellColor(currentId, COLOR_WALKED_ONCE);
+        eventLog.markComponent();
+      }
+      // If a real tail was actually pruned on the way here, this stop cell just lost
+      // one of its active neighbours (the tail) — the same effect as if the walker
+      // had approached it, turned around, and left again through a different side.
+      // That's a second genuine pass through this cell, so it needs the same bump
+      // any other double-visit gets — nothing else visits this cell again to record
+      // that on its own, since the tail that used to be there is gone.
+      if (removedAny && cells[currentId].walked < 2) {
+        cells[currentId].walked++;
+        setCellColor(currentId, cells[currentId].walked === 2 ? COLOR_WALKED_TWICE : COLOR_WALKED_ONCE);
         eventLog.markComponent();
       }
       break;
     }
 
     // Double-visited, single forward path: part of the tail — remove and advance
+    removedAny = true;
     removeFromShape(currentId);
     prevId    = currentId;
     currentId = forward[0];
