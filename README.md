@@ -25,4 +25,4 @@ A live demo of this code is available at [https://enabledornot.github.io/robotic
 
 ## Disclaimer
 
-This repository was built with the assistance of [Claude](https://claude.ai) (Anthropic's AI). All changes were reviewed and verified by a human.
+This repository was built with the assistance of [Claude](https://claude.ai) (Anthropic's AI) & GPT Codex by OpenAI. All changes were reviewed and verified by a human.
