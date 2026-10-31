@@ -370,6 +370,7 @@ function wavefront(d, T_minus, T_plus) {
  */
 export function runAlgorithm(matrix, options = {}) {
   reset();
+  eventLog.mode = 'wavefront-sweep';
   // Compute column components Hxi and their horizontal adjacencies
   // For all components H, mark H as unvisited and set s(H)
 

@@ -223,21 +223,21 @@
           <label style="font-size: 12px; color: #95a5a6; display: block; margin-bottom: 4px;">Algorithm Mode</label>
           <select id="algorithm-mode" style="width: 100%; background-color: #34495e; color: white; border: 1px solid #415b76; border-radius: 3px; padding: 5px 8px; font-size: 13px; cursor: pointer;">
             <option value="wavefront-sweep">Wavefront Sweep</option>
-            <option value="outer-peel">Outer Peel</option>
+            <option value="outer-peel" selected>Outer Peel</option>
           </select>
         </div>
 
         <div style="margin-top: 15px;">
           <label style="font-size: 12px; color: #95a5a6; display: block; margin-bottom: 4px;">Animation Level</label>
           <select id="anim-level" style="width: 100%; background-color: #34495e; color: white; border: 1px solid #415b76; border-radius: 3px; padding: 5px 8px; font-size: 13px; cursor: pointer;">
-            <option value="wavefront">Wavefront</option>
-            <option value="component" selected>Component</option>
+            <option value="full" selected>Full</option>
             <option value="edge">Edge</option>
-            <option value="full">Full</option>
+            <option value="component">Component</option>
+            <option value="wavefront">Wavefront</option>
           </select>
         </div>
 
-        <div style="margin-top: 10px;">
+        <div id="flip-control" style="margin-top: 10px;">
           <label style="display: flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer; color: #ecf0f1;">
             <input type="checkbox" id="flip-xy-checkbox">
             Flip Wave Coordinate
@@ -249,7 +249,7 @@
           <button id="select-start-btn" style="flex: 1;">Select Start Vertex</button>
         </div>
 
-        <div style="display: flex; gap: 8px; margin-top: 8px;">
+        <div id="remove-start-control" style="display: flex; gap: 8px; margin-top: 8px;">
           <button id="remove-start-btn" style="flex: 1;" disabled>Remove Start Vertex</button>
         </div>
 
@@ -268,6 +268,15 @@
             <tr><td style="padding: 3px 0; color: #ecf0f1;">Ctrl</td><td style="padding: 3px 0;">Toggle eraser</td></tr>
           </table>
         </div>
+
+        <section id="algorithm-guide" aria-live="polite" style="margin-top: 20px; padding: 9px; background: #253746; border-radius: 3px; font-size: 11px; line-height: 1.4;">
+          <strong id="guide-title" style="font-size: 12px; color: #ecf0f1;"></strong>
+          <p id="guide-description" style="margin: 4px 0 8px; color: #bdc3c7;"></p>
+          <div style="color: #95a5a6; text-transform: uppercase; font-size: 10px; margin-bottom: 3px;">Cell colors and marks</div>
+          <div id="color-legend" style="display: grid; gap: 3px;"></div>
+          <div style="color: #95a5a6; text-transform: uppercase; font-size: 10px; margin: 8px 0 3px;">Animation levels</div>
+          <ol id="level-guide" style="margin: 0; padding-left: 17px; color: #bdc3c7;"></ol>
+        </section>
       </aside>
 
       <!-- Bottom Bar Overlay (Full Width) -->

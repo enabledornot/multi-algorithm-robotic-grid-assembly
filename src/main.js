@@ -226,6 +226,28 @@ function drawLabels(cellLabels) {
   return container;
 }
 
+// Draw every boundary side reached by the outer-peel perimeter walk.
+function drawPerimeter(perimeterSides) {
+  const g = new PIXI.Graphics();
+  const width = Math.max(1.5, 2 / camera.zoom);
+
+  for (const side of perimeterSides) {
+    const gridX = edgeData.flipped ? side.row + edgeData.minX : side.col + edgeData.minX;
+    const gridY = edgeData.flipped ? side.col + edgeData.minY : side.row + edgeData.minY;
+    const screenSide = edgeData.flipped ? [3, 2, 1, 0][side.side] : side.side;
+    const x = gridX * gridSize;
+    const y = gridY * gridSize;
+
+    let x1 = x, y1 = y, x2 = x + gridSize, y2 = y;
+    if (screenSide === 1) { x1 = x + gridSize; y1 = y; x2 = x + gridSize; y2 = y + gridSize; }
+    else if (screenSide === 2) { x1 = x + gridSize; y1 = y + gridSize; x2 = x; y2 = y + gridSize; }
+    else if (screenSide === 3) { x1 = x; y1 = y + gridSize; x2 = x; y2 = y; }
+
+    g.moveTo(x1, y1).lineTo(x2, y2).stroke({ color: 0x000000, width });
+  }
+  return g;
+}
+
 // --- Main draw ---
 function draw() {
   world.removeChildren().forEach(child => child.destroy());
@@ -233,6 +255,7 @@ function draw() {
   // Replay event log up to current animation position
   const cellColors = {};
   const cellLabels = {};
+  const perimeterSides = [];
   const edges = [];
   const blackDots = new Set();
   if (edgeData && animState) {
@@ -241,6 +264,10 @@ function draw() {
     for (let i = 0; i < maxEvent; i++) {
       const ev = events[i];
       if (ev.type === 'updateCell') cellColors[`${ev.col},${ev.row}`] = ev.color;
+      else if (ev.type === 'updateCells') {
+        for (const update of ev.updates) cellColors[`${update.col},${update.row}`] = update.color;
+      }
+      else if (ev.type === 'markBorder' && !(edgeData.algorithm === 'outer-peel' && document.getElementById('anim-level').value === 'wavefront')) perimeterSides.push(ev);
       else if (ev.type === 'addEdge') edges.push(ev);
       else if (ev.type === 'colorDot') blackDots.add(`${ev.col},${ev.row}`);
       else if (ev.type === 'labelCell') cellLabels[`${ev.col},${ev.row}`] = ev.label;
@@ -249,11 +276,13 @@ function draw() {
 
   const grid = drawGrid();
   const cubeGraphics = drawCubes(cellColors, blackDots);
+  const perimeterGraphics = drawPerimeter(perimeterSides);
   const edgeGraphics = drawEdges(edges);
   const labelGraphics = drawLabels(cellLabels);
 
   world.addChild(grid);
   world.addChild(cubeGraphics);
+  world.addChild(perimeterGraphics);
   world.addChild(edgeGraphics);
   world.addChild(labelGraphics);
 
@@ -332,11 +361,12 @@ function isConnected(matrix, count) {
   // BFS using 4-directional adjacency
   const visited = new Set();
   const queue = [[startR, startC]];
+  let queueHead = 0;
   visited.add(`${startR},${startC}`);
   const dirs = [[0, 1], [0, -1], [1, 0], [-1, 0]];
 
-  while (queue.length > 0) {
-    const [r, c] = queue.shift();
+  while (queueHead < queue.length) {
+    const [r, c] = queue[queueHead++];
     for (const [dr, dc] of dirs) {
       const nr = r + dr;
       const nc = c + dc;
@@ -433,8 +463,11 @@ function click(cordX, cordY) {
 }
 
 function runAlgorithmWithStartVertex(gridX, gridY, autoPlay = true) {
+  const algorithmMode = document.getElementById('algorithm-mode').value;
   clearOutput();
-  appendOutput('Starting algorithm from selected vertex...');
+  appendOutput(algorithmMode === 'outer-peel'
+    ? 'Starting outer peel from the exterior perimeter...'
+    : 'Starting algorithm from selected vertex...');
   const { matrix, count, minX, minY } = cubeToMatrix();
 
   if (count === 0) {
@@ -442,13 +475,17 @@ function runAlgorithmWithStartVertex(gridX, gridY, autoPlay = true) {
     return;
   }
 
-  // Check if selected vertex is within bounds
-  // When flipped: algorithm col = gridY - minY, row = gridX - minX
-  const matrixX = flipXY ? (gridY - minY) : (gridX - minX);
-  const matrixY = flipXY ? (gridX - minX) : (gridY - minY);
-  if (matrixX < 0 || matrixX >= matrix[0].length || matrixY < 0 || matrixY >= matrix.length || !matrix[matrixY][matrixX]) {
-    appendOutput('Error: Selected vertex must be on a cube.');
-    return;
+  let matrixX;
+  let matrixY;
+  if (algorithmMode !== 'outer-peel') {
+    // Check if selected vertex is within bounds
+    // When flipped: algorithm col = gridY - minY, row = gridX - minX
+    matrixX = flipXY ? (gridY - minY) : (gridX - minX);
+    matrixY = flipXY ? (gridX - minX) : (gridY - minY);
+    if (matrixX < 0 || matrixX >= matrix[0].length || matrixY < 0 || matrixY >= matrix.length || !matrix[matrixY][matrixX]) {
+      appendOutput('Error: Selected vertex must be on a cube.');
+      return;
+    }
   }
 
   const rows = matrix.length;
@@ -460,20 +497,26 @@ function runAlgorithmWithStartVertex(gridX, gridY, autoPlay = true) {
     return;
   }
 
-  const algorithmMode = document.getElementById('algorithm-mode').value;
-  const { eventLog, vcompCount } = getAlgorithmRunner()(matrix, { startX: matrixX, startY: matrixY });
+  const { eventLog, vcompCount, stats } = getAlgorithmRunner()(matrix, { startX: matrixX, startY: matrixY });
   edgeData = { eventLog, minX, minY, flipped: flipXY, algorithm: algorithmMode };
+  if (stats?.error) appendOutput(`Error: ${stats.error}`);
   const vertCount = eventLog.events.filter(e => e.type === 'addEdge' && e.edgeType === 'vertical').length;
   const horzCount = eventLog.events.filter(e => e.type === 'addEdge' && e.edgeType === 'horizontal').length;
-  appendOutput(`Vertical edges: ${vertCount}`);
-  appendOutput(`Horizontal edges: ${horzCount}`);
-  appendOutput(`Waves: ${eventLog.stepsForLevel('wavefront').length}`);
-  appendOutput(`Vertical components: ${vcompCount}`);
-  const treeStats = computeTreeStats(eventLog);
-  if (treeStats) {
-    appendOutput(`Tree height: ${treeStats.height}`);
-    appendOutput(`Tree width: ${treeStats.width}`);
-    appendOutput(`Leaves: ${treeStats.leaves}`);
+  if (algorithmMode === 'outer-peel' && !stats?.error) {
+    appendOutput(`Cells removed: ${stats.removed}`);
+    appendOutput(`Cells remaining: ${stats.remaining}`);
+    appendOutput(`Peel groups: ${stats.groups}`);
+  } else if (algorithmMode !== 'outer-peel') {
+    appendOutput(`Vertical edges: ${vertCount}`);
+    appendOutput(`Horizontal edges: ${horzCount}`);
+    appendOutput(`Waves: ${eventLog.stepsForLevel('wavefront').length}`);
+    appendOutput(`Vertical components: ${vcompCount}`);
+    const treeStats = computeTreeStats(eventLog);
+    if (treeStats) {
+      appendOutput(`Tree height: ${treeStats.height}`);
+      appendOutput(`Tree width: ${treeStats.width}`);
+      appendOutput(`Leaves: ${treeStats.leaves}`);
+    }
   }
   const level = document.getElementById('anim-level').value;
   animState = { steps: computeSteps(level), position: 0 };
@@ -662,19 +705,26 @@ function runAlgorithm(autoPlay = true) {
   }
 
   const algorithmMode = document.getElementById('algorithm-mode').value;
-  const { eventLog, vcompCount } = getAlgorithmRunner()(matrix);
+  const { eventLog, vcompCount, stats } = getAlgorithmRunner()(matrix);
   edgeData = { eventLog, minX, minY, flipped: flipXY, algorithm: algorithmMode };
+  if (stats?.error) appendOutput(`Error: ${stats.error}`);
   const vertCount = eventLog.events.filter(e => e.type === 'addEdge' && e.edgeType === 'vertical').length;
   const horzCount = eventLog.events.filter(e => e.type === 'addEdge' && e.edgeType === 'horizontal').length;
-  appendOutput(`Vertical edges: ${vertCount}`);
-  appendOutput(`Horizontal edges: ${horzCount}`);
-  appendOutput(`Waves: ${eventLog.stepsForLevel('wavefront').length}`);
-  appendOutput(`Vertical components: ${vcompCount}`);
-  const treeStats = computeTreeStats(eventLog);
-  if (treeStats) {
-    appendOutput(`Tree height: ${treeStats.height}`);
-    appendOutput(`Tree width: ${treeStats.width}`);
-    appendOutput(`Leaves: ${treeStats.leaves}`);
+  if (algorithmMode === 'outer-peel' && !stats?.error) {
+    appendOutput(`Cells removed: ${stats.removed}`);
+    appendOutput(`Cells remaining: ${stats.remaining}`);
+    appendOutput(`Peel groups: ${stats.groups}`);
+  } else if (algorithmMode !== 'outer-peel') {
+    appendOutput(`Vertical edges: ${vertCount}`);
+    appendOutput(`Horizontal edges: ${horzCount}`);
+    appendOutput(`Waves: ${eventLog.stepsForLevel('wavefront').length}`);
+    appendOutput(`Vertical components: ${vcompCount}`);
+    const treeStats = computeTreeStats(eventLog);
+    if (treeStats) {
+      appendOutput(`Tree height: ${treeStats.height}`);
+      appendOutput(`Tree width: ${treeStats.width}`);
+      appendOutput(`Leaves: ${treeStats.leaves}`);
+    }
   }
   const level = document.getElementById('anim-level').value;
   animState = { steps: computeSteps(level), position: 0 };
@@ -1037,6 +1087,134 @@ document.getElementById('anim-level').addEventListener('change', () => {
   if (!edgeData) return;
   stopPlay();
   animState = { steps: computeSteps(document.getElementById('anim-level').value), position: 0 };
+  updateScrubber();
+  draw();
+});
+
+function refreshAnimationLevelOptions(resetSelection = false) {
+  const isOuterPeel = document.getElementById('algorithm-mode').value === 'outer-peel';
+  const select = document.getElementById('anim-level');
+  const selectedValue = resetSelection ? 'full' : select.value;
+  const options = isOuterPeel
+    ? [
+        ['full', 'Every Step'],
+        ['wavefront', 'Skip Perimeter Walk'],
+        ['component', 'Group Leaf Removals'],
+        ['edge', 'Perimeter Walk Stages'],
+      ]
+    : [
+        ['full', 'Full'],
+        ['edge', 'Edge'],
+        ['component', 'Component'],
+        ['wavefront', 'Wavefront'],
+      ];
+
+  select.replaceChildren(...options.map(([value, label]) => {
+    const option = document.createElement('option');
+    option.value = value;
+    option.textContent = label;
+    return option;
+  }));
+  select.value = options.some(([value]) => value === selectedValue) ? selectedValue : 'full';
+}
+
+function updateAlgorithmGuide() {
+  const isOuterPeel = document.getElementById('algorithm-mode').value === 'outer-peel';
+  const guide = isOuterPeel ? {
+    title: 'Outer Peel',
+    description: 'The walk reveals accessible perimeter sides. Accessible leaves peel first, followed by safe closed corners or opening pairs.',
+    colors: [
+      { color: '#808080', label: 'Active cell not currently queued as a leaf or safe peel candidate.' },
+      { color: '#E67E22', label: 'Accessible leaf queued to peel.' },
+      { color: '#F1C40F', label: 'Safe corner candidate; may peel alone or with a partner.' },
+      { color: '#2ECC71', label: 'Removed cell in the build order.' },
+      { kind: 'line', color: '#000000', label: 'Black border: perimeter side reached by the walk.' },
+    ],
+    levels: [
+      ['Full', 'Every border mark, color change, and removal event.'],
+      ['Skip Perimeter Walk', 'Hides individual border marks but keeps the other events.'],
+      ['Group Leaf Removals', 'Combines each complete leaf-draining phase into one frame; safe peels stay separate.'],
+      ['Perimeter Walk Stages', 'Shows the initial perimeter and checkpoints after pair peels open new perimeter.'],
+    ],
+  } : {
+    title: 'Wavefront Sweep',
+    description: 'The sweep processes vertical components from a chosen start and orients assembly edges as the wavefront expands.',
+    colors: [
+      { color: '#FFB3B3', label: 'Initialized cell; the sweep has not processed it yet.' },
+      { color: '#90EE90', label: 'Component currently being processed.' },
+      { color: '#ADD8E6', label: 'Component finished and visited.' },
+      { kind: 'dot', color: '#000000', label: 'Black dot: selected start vertex for the sweep.' },
+      { kind: 'line', color: '#808080', label: 'Gray arrow: an oriented assembly edge.' },
+    ],
+    levels: [
+      ['Full', 'Every cell update, start marker, and oriented edge event.'],
+      ['Edge', 'Checkpoints after the component’s edge-orientation phases.'],
+      ['Component', 'One checkpoint as each vertical component begins processing.'],
+      ['Wavefront', 'One checkpoint after all components in a sweep wave are processed.'],
+    ],
+  };
+
+  document.getElementById('guide-title').textContent = guide.title;
+  document.getElementById('guide-description').textContent = guide.description;
+  const colorLegend = document.getElementById('color-legend');
+  colorLegend.replaceChildren(...guide.colors.map(item => {
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;align-items:center;gap:6px;color:#bdc3c7;';
+    const swatch = document.createElement('span');
+    swatch.style.cssText = 'display:inline-block;flex:none;width:12px;height:12px;box-sizing:border-box;border:1px solid rgba(255,255,255,.35);';
+    if (item.kind === 'line') {
+      swatch.style.height = '8px';
+      swatch.style.border = '0';
+      swatch.style.background = `linear-gradient(transparent 38%, ${item.color} 38%, ${item.color} 62%, transparent 62%)`;
+    } else {
+      swatch.style.backgroundColor = item.color;
+      if (item.kind === 'dot') swatch.style.borderRadius = '50%';
+    }
+    const label = document.createElement('span');
+    label.textContent = item.label;
+    row.append(swatch, label);
+    return row;
+  }));
+
+  const levelGuide = document.getElementById('level-guide');
+  levelGuide.replaceChildren(...guide.levels.map(([name, description]) => {
+    const item = document.createElement('li');
+    const strong = document.createElement('strong');
+    strong.textContent = `${name}: `;
+    const text = document.createElement('span');
+    text.textContent = description;
+    item.append(strong, text);
+    return item;
+  }));
+}
+
+function updateModeSpecificControls() {
+  const isOuterPeel = document.getElementById('algorithm-mode').value === 'outer-peel';
+  document.getElementById('flip-control').style.display = isOuterPeel ? 'none' : '';
+  document.getElementById('select-start-btn').style.display = isOuterPeel ? 'none' : '';
+  document.getElementById('remove-start-control').style.display = isOuterPeel ? 'none' : 'flex';
+
+  if (isOuterPeel) {
+    flipXY = false;
+    document.getElementById('flip-xy-checkbox').checked = false;
+    selectingStartVertex = false;
+    selectedStartVertex = null;
+    document.getElementById('remove-start-btn').disabled = true;
+    document.getElementById('select-start-btn').textContent = 'Select Start Vertex';
+    document.getElementById('select-start-btn').style.backgroundColor = '';
+  }
+  updateAlgorithmGuide();
+}
+
+refreshAnimationLevelOptions();
+updateModeSpecificControls();
+document.getElementById('algorithm-mode').addEventListener('change', () => {
+  refreshAnimationLevelOptions(true);
+  updateModeSpecificControls();
+  stopPlay();
+  edgeData = null;
+  animState = null;
+  clearOutput();
   updateScrubber();
   draw();
 });

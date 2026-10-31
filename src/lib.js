@@ -36,6 +36,8 @@ export class EventLog {
         this.componentBoundaries = [];
         this.wavefrontBoundaries = [];
         this.edgeBoundaries = [];
+        this.perimeterBoundaries = [];
+        this.mode = null;
     }
 
     addEdge(edgeType, col, row, orientation) {
@@ -44,6 +46,14 @@ export class EventLog {
 
     updateCell(col, row, color) {
         this.events.push({ type: 'updateCell', col, row, color });
+    }
+
+    updateCells(updates) {
+        this.events.push({ type: 'updateCells', updates });
+    }
+
+    markBorder(col, row, side) {
+        this.events.push({ type: 'markBorder', col, row, side });
     }
 
     colorDot(col, row) {
@@ -66,14 +76,27 @@ export class EventLog {
         this.edgeBoundaries.push(this.events.length);
     }
 
+    markPerimeter() {
+        this.perimeterBoundaries.push(this.events.length);
+    }
+
     stepsForLevel(level) {
         const len = this.events.length;
         if (len === 0) return [];
         switch (level) {
             case 'full':
                 return Array.from({ length: len }, (_, i) => i + 1);
+            case 'wavefront': {
+                if (this.mode !== 'outer-peel') {
+                    return this.wavefrontBoundaries.filter((v, i) => v > 0 && (i === 0 || v !== this.wavefrontBoundaries[i - 1]));
+                }
+                // Outer-peel's wavefront level keeps all semantic changes but
+                // skips the per-side border-drawing events from perimeter walks.
+                return this.events.flatMap((event, i) => event.type === 'markBorder' ? [] : [i + 1]);
+            }
             case 'edge': {
-                const steps = this.edgeBoundaries.filter((v, i) => v > 0 && (i === 0 || v !== this.edgeBoundaries[i - 1]));
+                const boundaries = this.mode === 'outer-peel' ? this.perimeterBoundaries : this.edgeBoundaries;
+                const steps = boundaries.filter((v, i) => v > 0 && (i === 0 || v !== boundaries[i - 1]));
                 if (steps.length === 0 || steps[steps.length - 1] !== len) steps.push(len);
                 return steps;
             }
@@ -82,8 +105,6 @@ export class EventLog {
                 if (steps.length === 0 || steps[steps.length - 1] !== len) steps.push(len);
                 return steps;
             }
-            case 'wavefront':
-                return this.wavefrontBoundaries.filter((v, i) => v > 0 && (i === 0 || v !== this.wavefrontBoundaries[i - 1]));
             default:
                 return [];
         }
