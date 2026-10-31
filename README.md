@@ -3,7 +3,7 @@
 An interactive web demo of the wavefront sweep algorithm. Place cells on a grid, then watch the algorithm orient edges across vertical components using an animated wavefront traversal.
 
 ## Live Demo
-A live demo of this code is available at [https://enabledornot.github.io/robotic-grid-assembly-demo/](https://enabledornot.github.io/robotic-grid-assembly-demo/)
+A live demo of this code is available at [https://enabledornot.github.io/multi-algorithm-robotic-grid-assembly/](https://enabledornot.github.io/multi-algorithm-robotic-grid-assembly/)
 
 ## Setup
 
