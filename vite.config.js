@@ -1,5 +1,5 @@
 import { defineConfig } from 'vite'
 
 export default defineConfig({
-  base: '/robotic-grid-assembly-demo/',
+  base: '/multi-algorithm-robotic-grid-assembly/',
 })
