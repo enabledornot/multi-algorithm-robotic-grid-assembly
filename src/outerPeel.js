@@ -273,7 +273,9 @@ export function runAlgorithm(matrix, _options = {}) {
     knownOutsideSides.add(key);
     const cell = cells[id];
     eventLog.markBorder(cell.col, cell.row, dir);
-    enqueueClassification(cell);
+    // A newly reached outside side can make an adjacent corner's pair
+    // partner eligible. Refresh the local 8-neighborhood, not just this cell.
+    classifyNeighborhood(cell.col, cell.row);
     return true;
   }
 
