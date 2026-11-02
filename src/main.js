@@ -98,7 +98,8 @@ function drawCubes(cellColors, blackDots) {
     }
 
     // Highlight the selected start vertex with a colored border (unless wavefront is running)
-    if (selectedStartVertex && !edgeData && cube.x === selectedStartVertex.gridX && cube.y === selectedStartVertex.gridY) {
+    if (selectedStartVertex && (!edgeData || edgeData.algorithm === 'outer-peel') &&
+        cube.x === selectedStartVertex.gridX && cube.y === selectedStartVertex.gridY) {
       g.rect(px + 2, py + 2, gridSize - 4, gridSize - 4);
       g.stroke({ color: 0x00ff00, width: 4 });
     }
@@ -466,7 +467,7 @@ function runAlgorithmWithStartVertex(gridX, gridY, autoPlay = true) {
   const algorithmMode = document.getElementById('algorithm-mode').value;
   clearOutput();
   appendOutput(algorithmMode === 'outer-peel'
-    ? 'Starting outer peel from the exterior perimeter...'
+    ? 'Starting outer peel from the selected perimeter cell...'
     : 'Starting algorithm from selected vertex...');
   const { matrix, count, minX, minY } = cubeToMatrix();
 
@@ -477,15 +478,13 @@ function runAlgorithmWithStartVertex(gridX, gridY, autoPlay = true) {
 
   let matrixX;
   let matrixY;
-  if (algorithmMode !== 'outer-peel') {
-    // Check if selected vertex is within bounds
-    // When flipped: algorithm col = gridY - minY, row = gridX - minX
-    matrixX = flipXY ? (gridY - minY) : (gridX - minX);
-    matrixY = flipXY ? (gridX - minX) : (gridY - minY);
-    if (matrixX < 0 || matrixX >= matrix[0].length || matrixY < 0 || matrixY >= matrix.length || !matrix[matrixY][matrixX]) {
-      appendOutput('Error: Selected vertex must be on a cube.');
-      return;
-    }
+  // When flipped: wavefront col = gridY - minY, row = gridX - minX.
+  // Outer Peel always uses the normal grid orientation.
+  matrixX = algorithmMode !== 'outer-peel' && flipXY ? (gridY - minY) : (gridX - minX);
+  matrixY = algorithmMode !== 'outer-peel' && flipXY ? (gridX - minX) : (gridY - minY);
+  if (matrixX < 0 || matrixX >= matrix[0].length || matrixY < 0 || matrixY >= matrix.length || !matrix[matrixY][matrixX]) {
+    appendOutput('Error: Selected vertex must be on a cube.');
+    return;
   }
 
   const rows = matrix.length;
@@ -497,9 +496,14 @@ function runAlgorithmWithStartVertex(gridX, gridY, autoPlay = true) {
     return;
   }
 
-  const { eventLog, vcompCount, stats } = getAlgorithmRunner()(matrix, { startX: matrixX, startY: matrixY });
+  const { eventLog, vcompCount, stats, preferredStartSatisfied, preferredStartWasFirstPeel, preferredStartWasFirstSafePeel } = getAlgorithmRunner()(matrix, { startX: matrixX, startY: matrixY });
   edgeData = { eventLog, minX, minY, flipped: flipXY, algorithm: algorithmMode };
   if (stats?.error) appendOutput(`Error: ${stats.error}`);
+  if (algorithmMode === 'outer-peel' && !stats?.error) {
+    if (preferredStartWasFirstPeel) appendOutput('Selected cell was the first peel group.');
+    else if (preferredStartWasFirstSafePeel) appendOutput('Selected cell was forced as the first safe peel after mandatory leaves.');
+    else if (preferredStartSatisfied) appendOutput('Selected cell was prioritized during mandatory leaf peeling.');
+  }
   const vertCount = eventLog.events.filter(e => e.type === 'addEdge' && e.edgeType === 'vertical').length;
   const horzCount = eventLog.events.filter(e => e.type === 'addEdge' && e.edgeType === 'horizontal').length;
   if (algorithmMode === 'outer-peel' && !stats?.error) {
@@ -576,9 +580,13 @@ app.canvas.addEventListener('mousedown', e => {
       updatePlayIcon();
     }
 
-    // Store the selected vertex (keep selection mode active - don't set selectingStartVertex to false)
+    // Finish selection after one cell so later canvas clicks do not silently
+    // replace the chosen start.
     selectedStartVertex = { gridX, gridY };
+    selectingStartVertex = false;
     document.getElementById('remove-start-btn').disabled = false;
+    document.getElementById('select-start-btn').textContent = 'Move Start Vertex';
+    document.getElementById('select-start-btn').style.backgroundColor = '';
     appendOutput(`Start vertex selected at (${gridX}, ${gridY})`);
     draw(); // Redraw to show visual feedback
     return;
@@ -796,6 +804,7 @@ document.getElementById('select-start-btn').addEventListener('click', () => {
   if (selectingStartVertex) {
     selectingStartVertex = false;
     document.getElementById('select-start-btn').style.backgroundColor = '';
+    document.getElementById('select-start-btn').textContent = selectedStartVertex ? 'Move Start Vertex' : 'Select Start Vertex';
     clearOutput();
     appendOutput('Selection cancelled.');
     return;
@@ -852,6 +861,7 @@ document.addEventListener('keydown', e => {
   if (e.key === 'Escape' && selectingStartVertex) {
     selectingStartVertex = false;
     document.getElementById('select-start-btn').style.backgroundColor = '';
+    document.getElementById('select-start-btn').textContent = selectedStartVertex ? 'Move Start Vertex' : 'Select Start Vertex';
     clearOutput();
     appendOutput('Selection cancelled.');
   }
@@ -1122,7 +1132,7 @@ function updateAlgorithmGuide() {
   const isOuterPeel = document.getElementById('algorithm-mode').value === 'outer-peel';
   const guide = isOuterPeel ? {
     title: 'Outer Peel',
-    description: 'The walk reveals accessible perimeter sides. Accessible leaves peel first, followed by safe closed corners or opening pairs.',
+    description: 'The selected exterior cell seeds the initial perimeter walk. Its exposed sides are tried North, East, South, West; the first side tracing the outside boundary is used, while hole boundaries are skipped. The walk then follows accessible perimeter sides. Leaves peel first, followed by safe closed corners or opening pairs.',
     colors: [
       { color: '#808080', label: 'Active cell not currently queued as a leaf or safe peel candidate.' },
       { color: '#E67E22', label: 'Accessible leaf queued to peel.' },
@@ -1191,17 +1201,15 @@ function updateAlgorithmGuide() {
 function updateModeSpecificControls() {
   const isOuterPeel = document.getElementById('algorithm-mode').value === 'outer-peel';
   document.getElementById('flip-control').style.display = isOuterPeel ? 'none' : '';
-  document.getElementById('select-start-btn').style.display = isOuterPeel ? 'none' : '';
-  document.getElementById('remove-start-control').style.display = isOuterPeel ? 'none' : 'flex';
+  document.getElementById('select-start-btn').style.display = '';
+  document.getElementById('remove-start-control').style.display = 'flex';
 
   if (isOuterPeel) {
     flipXY = false;
     document.getElementById('flip-xy-checkbox').checked = false;
     selectingStartVertex = false;
-    selectedStartVertex = null;
-    document.getElementById('remove-start-btn').disabled = true;
-    document.getElementById('select-start-btn').textContent = 'Select Start Vertex';
     document.getElementById('select-start-btn').style.backgroundColor = '';
+    document.getElementById('select-start-btn').textContent = selectedStartVertex ? 'Move Start Vertex' : 'Select Start Vertex';
   }
   updateAlgorithmGuide();
 }

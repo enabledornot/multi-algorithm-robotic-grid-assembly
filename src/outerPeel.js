@@ -48,6 +48,11 @@ export function runAlgorithm(matrix, _options = {}) {
   let leafHead = 0;
   let safeHead = 0;
   let nextRevision = 1;
+  let preferredStartId = null;
+  let preferredStartSatisfied = false;
+  let preferredStartWasFirstPeel = false;
+  let preferredStartWasFirstSafePeel = false;
+  let error = null;
 
   const positionKey = (col, row) => `${col},${row}`;
   const sideKey = (id, dir) => id * 4 + dir;
@@ -150,6 +155,8 @@ export function runAlgorithm(matrix, _options = {}) {
     const revision = nextRevision++;
     cell.revision = revision;
     cell.queuedAs = null;
+    cell.queuedEntry = null;
+    cell.queuedLeafEntry = null;
 
     const degree = activeDegree(cell);
     if (degree <= 1) {
@@ -161,7 +168,8 @@ export function runAlgorithm(matrix, _options = {}) {
         return;
       }
       cell.queuedAs = 'leaf';
-      leafQueue.push({ id: cell.id, revision });
+      cell.queuedLeafEntry = { id: cell.id, revision };
+      leafQueue.push(cell.queuedLeafEntry);
       setColor(cell, COLOR_LEAF);
       return;
     }
@@ -218,7 +226,8 @@ export function runAlgorithm(matrix, _options = {}) {
     }
 
     cell.queuedAs = action;
-    safeQueue.push({ id: cell.id, partnerId, action, revision });
+    cell.queuedEntry = { id: cell.id, partnerId, action, revision };
+    safeQueue.push(cell.queuedEntry);
     setColor(cell, COLOR_CANDIDATE);
   }
 
@@ -315,6 +324,72 @@ export function runAlgorithm(matrix, _options = {}) {
     }
   }
 
+  // Inspect a boundary loop without declaring it exterior. The signed area
+  // distinguishes the outer boundary (positive with occupied cells on the
+  // right) from a hole boundary (negative), so a selected cell inside a hole
+  // cannot accidentally expose that hole to the algorithm.
+  function collectBoundaryLoop(startId, startDir) {
+    const sides = [];
+    const seen = new Set();
+    let id = startId;
+    let sideDir = startDir;
+    let signedAreaTwice = 0;
+    const startKey = sideKey(startId, startDir);
+
+    for (let count = 0; count <= cells.length * 4; count++) {
+      const key = sideKey(id, sideDir);
+      if (key === startKey && sides.length > 0) return { sides, signedAreaTwice };
+      if (seen.has(key)) return null;
+      seen.add(key);
+
+      const cell = cells[id];
+      const start = sideStart(cell, sideDir);
+      const end = sideEnd(cell, sideDir);
+      sides.push({ id, sideDir });
+      signedAreaTwice += start.x * end.y - end.x * start.y;
+
+      const travelDir = start.travelDir;
+      const outgoing = outgoingBoundarySides(end.x, end.y);
+      if (outgoing.length === 0) return null;
+      const preference = [
+        (travelDir + 1) % 4,
+        travelDir,
+        (travelDir + 3) % 4,
+        (travelDir + 2) % 4,
+      ];
+      outgoing.sort((a, b) => preference.indexOf(a.travelDir) - preference.indexOf(b.travelDir));
+      id = outgoing[0].id;
+      sideDir = outgoing[0].sideDir;
+    }
+    return null;
+  }
+
+  function walkInitialPerimeter() {
+    const selected = preferredStartId === null ? null : cells[preferredStartId];
+    if (selected && !selected.isRemoved) {
+      // A selected cell may touch several boundary loops. Try its exposed
+      // sides in the same deterministic direction order used elsewhere.
+      for (let dir = 0; dir < 4; dir++) {
+        if (isActive(neighborId(selected, dir))) continue;
+        const loop = collectBoundaryLoop(selected.id, dir);
+        if (!loop || loop.signedAreaTwice <= 0) continue;
+        for (const side of loop.sides) recordBoundarySide(side.id, side.sideDir);
+        return true;
+      }
+      error = 'Selected start cell is not on the exterior perimeter. Choose a cell on the outside boundary.';
+      return false;
+    }
+
+    // No selected exterior side was found; use the guaranteed top/left
+    // exterior seed as the default.
+    const first = cells[0];
+    let startDir = -1;
+    for (let dir = 0; dir < 4; dir++) {
+      if (!isActive(neighborId(first, dir))) { startDir = dir; break; }
+    }
+    return startDir >= 0 && walkNewPerimeter(first.id, startDir);
+  }
+
   function enqueueNewlyExposedSides(removedIds) {
     let walkCount = 0;
     for (const id of removedIds) {
@@ -335,6 +410,11 @@ export function runAlgorithm(matrix, _options = {}) {
     if (activeIds.length === 0) return { removed: false, walkCount: 0 };
     if (ids.length === 2 && activeIds.length !== 2) return { removed: false, walkCount: 0 };
     if (createsSingularDiagonal(activeIds)) return { removed: false, walkCount: 0 };
+
+    if (preferredStartId !== null && activeIds.includes(preferredStartId)) {
+      preferredStartSatisfied = true;
+      if (peelGroups.length === 0) preferredStartWasFirstPeel = true;
+    }
 
     // Pair removals are one event, so even full-detail playback never exposes
     // the transient one-cell-removed state.
@@ -361,40 +441,92 @@ export function runAlgorithm(matrix, _options = {}) {
   }
 
   function takeLeaf() {
+    const preferred = preferredStartId === null ? null : cells[preferredStartId];
+    if (preferred && !preferred.isRemoved && preferred.queuedAs === 'leaf') {
+      preferred.revision = nextRevision++;
+      preferred.queuedAs = null;
+      preferred.queuedLeafEntry = null;
+      return preferred.id;
+    }
+
     while (leafHead < leafQueue.length) {
       const entry = leafQueue[leafHead++];
       const cell = cells[entry.id];
-      if (!cell.isRemoved && cell.revision === entry.revision && cell.queuedAs === 'leaf') return cell.id;
+      if (!cell.isRemoved && cell.revision === entry.revision && cell.queuedAs === 'leaf') {
+        cell.queuedAs = null;
+        cell.queuedLeafEntry = null;
+        return cell.id;
+      }
+    }
+    return null;
+  }
+
+  function takePreferredSafeCandidate() {
+    const target = cells[preferredStartId];
+    if (!target || target.isRemoved) return null;
+
+    // A selected cell can be either the corner candidate or its pair partner.
+    // Check only its own entry and four adjacent entries.
+    const anchors = [preferredStartId];
+    for (let dir = 0; dir < 4; dir++) {
+      const id = neighborId(target, dir);
+      if (id !== null && id !== undefined) anchors.push(id);
+    }
+
+    for (const id of anchors) {
+      const anchor = cells[id];
+      let entry = anchor.queuedEntry;
+      if (!entry || anchor.isRemoved || anchor.revision !== entry.revision || anchor.queuedAs !== entry.action) continue;
+      if (entry.id !== preferredStartId && entry.partnerId !== preferredStartId) continue;
+      if (!isSafeEntry(entry)) {
+        entry = anchor.queuedEntry;
+        if (!entry || anchor.isRemoved || anchor.revision !== entry.revision || anchor.queuedAs !== entry.action ||
+            (entry.id !== preferredStartId && entry.partnerId !== preferredStartId) || !isSafeEntry(entry)) continue;
+      }
+
+      anchor.revision = nextRevision++;
+      anchor.queuedAs = null;
+      anchor.queuedEntry = null;
+      return entry;
     }
     return null;
   }
 
   function takeSafeCandidate() {
+    if (preferredStartId !== null && !preferredStartSatisfied) {
+      // Forced preference: do not silently fall back to another corner.
+      return takePreferredSafeCandidate();
+    }
+
     while (safeHead < safeQueue.length) {
       const entry = safeQueue[safeHead++];
       const cell = cells[entry.id];
       if (cell.isRemoved || cell.revision !== entry.revision || cell.queuedAs !== entry.action) continue;
 
-      if (entry.action === 'pair') {
-        const partner = cells[entry.partnerId];
-        const isAdjacent = DIRS.some((_, dir) => neighborId(cell, dir) === entry.partnerId);
-        const partnerStillEligible = partner && !partner.isRemoved && isAdjacent &&
-          activeDegree(partner) === 2 && hasOutsideSide(partner) &&
-          !createsSingularDiagonal([cell.id, partner.id]);
-
-        // A partner's degree can change when one of its other neighbours is
-        // removed, which may be two cells away from the queued corner. Refresh
-        // the corner now so it can select a different partner or leave the
-        // safe queue entirely.
-        if (!partnerStillEligible) {
-          enqueueClassification(cell);
-          continue;
-        }
-      }
+      if (!isSafeEntry(entry)) continue;
 
       return entry;
     }
     return null;
+  }
+
+  function isSafeEntry(entry) {
+    if (entry.action !== 'pair') return true;
+    const cell = cells[entry.id];
+    const partner = cells[entry.partnerId];
+    const isAdjacent = DIRS.some((_, dir) => neighborId(cell, dir) === entry.partnerId);
+    const partnerStillEligible = partner && !partner.isRemoved && isAdjacent &&
+      activeDegree(partner) === 2 && hasOutsideSide(partner) &&
+      !createsSingularDiagonal([cell.id, partner.id]);
+
+    // A partner's degree can change when one of its other neighbours is
+    // removed, which may be two cells away from the queued corner. Refresh
+    // the corner so it can select a different partner or leave the safe queue.
+    if (!partnerStillEligible) {
+      enqueueClassification(cell);
+      return false;
+    }
+    return true;
   }
 
   // Materialize occupied cells and their static coordinate lookup. The input
@@ -437,18 +569,17 @@ export function runAlgorithm(matrix, _options = {}) {
     };
   }
 
+  if (Number.isInteger(_options.startX) && Number.isInteger(_options.startY)) {
+    preferredStartId = byPosition.get(positionKey(_options.startX, _options.startY)) ?? null;
+    if (preferredStartId === null) error = 'Selected start cell is not an occupied cell.';
+  } else if (_options.startX !== undefined || _options.startY !== undefined) {
+    error = 'Selected start cell coordinates are invalid.';
+  }
+
   for (const cell of cells) enqueueClassification(cell);
 
-  if (cells.length > 0) {
-    // The first occupied cell in row-major order has an exposed north or west
-    // side. Start from any exposed side and trace the exterior boundary once.
-    const first = cells[0];
-    let startDir = -1;
-    for (let dir = 0; dir < 4; dir++) {
-      if (!isActive(neighborId(first, dir))) { startDir = dir; break; }
-    }
-    if (startDir >= 0) {
-      walkNewPerimeter(first.id, startDir);
+  if (error === null && cells.length > 0) {
+    if (walkInitialPerimeter()) {
       eventLog.markPerimeter();
       eventLog.markComponent();
     }
@@ -456,7 +587,7 @@ export function runAlgorithm(matrix, _options = {}) {
 
   // Leaves always take priority. Only when none remain do we process a
   // closed single peel or an opening pair peel.
-  while (true) {
+  while (error === null) {
     const leafId = takeLeaf();
     if (leafId !== null) {
       let removedLeaf = false;
@@ -471,7 +602,16 @@ export function runAlgorithm(matrix, _options = {}) {
     }
 
     const candidate = takeSafeCandidate();
-    if (candidate === null) break;
+    if (candidate === null) {
+      if (preferredStartId !== null && !preferredStartSatisfied && !cells[preferredStartId].isRemoved) {
+        error = 'The selected cell is not currently a safe peel candidate. Choose a leaf, corner, or pair candidate.';
+      }
+      break;
+    }
+    if (!preferredStartSatisfied && preferredStartId !== null &&
+        (candidate.id === preferredStartId || candidate.partnerId === preferredStartId)) {
+      preferredStartWasFirstSafePeel = true;
+    }
     const result = removeGroup(candidate.action === 'pair' ? [candidate.id, candidate.partnerId] : [candidate.id]);
     if (result.removed) {
       if (candidate.action === 'pair' && result.walkCount > 0) eventLog.markPerimeter();
@@ -484,7 +624,10 @@ export function runAlgorithm(matrix, _options = {}) {
   return {
     eventLog,
     vcompCount: cells.length,
-    stats: { removed: buildOrder.length, remaining: remaining.length, groups: peelGroups.length },
+    stats: { removed: buildOrder.length, remaining: remaining.length, groups: peelGroups.length, ...(error ? { error } : {}) },
+    preferredStartSatisfied,
+    preferredStartWasFirstPeel,
+    preferredStartWasFirstSafePeel,
     cells,
     buildOrder,
     peelGroups,
