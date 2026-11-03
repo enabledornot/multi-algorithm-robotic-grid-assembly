@@ -56,6 +56,10 @@ export class EventLog {
         this.events.push({ type: 'markBorder', col, row, side });
     }
 
+    clearPerimeter() {
+        this.events.push({ type: 'clearPerimeter' });
+    }
+
     colorDot(col, row) {
         this.events.push({ type: 'colorDot', col, row });
     }

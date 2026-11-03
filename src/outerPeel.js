@@ -581,6 +581,8 @@ export function runAlgorithm(matrix, _options = {}) {
   if (error === null && cells.length > 0) {
     if (walkInitialPerimeter()) {
       eventLog.markPerimeter();
+      eventLog.clearPerimeter();
+      eventLog.markPerimeter();
       eventLog.markComponent();
     }
   }
@@ -595,6 +597,11 @@ export function runAlgorithm(matrix, _options = {}) {
       while (currentLeaf !== null) {
         const result = removeGroup([currentLeaf]);
         removedLeaf ||= result.removed;
+        if (result.removed && result.walkCount > 0) {
+          eventLog.markPerimeter();
+          eventLog.clearPerimeter();
+          eventLog.markPerimeter();
+        }
         currentLeaf = takeLeaf();
       }
       if (removedLeaf) eventLog.markComponent();
@@ -614,7 +621,11 @@ export function runAlgorithm(matrix, _options = {}) {
     }
     const result = removeGroup(candidate.action === 'pair' ? [candidate.id, candidate.partnerId] : [candidate.id]);
     if (result.removed) {
-      if (candidate.action === 'pair' && result.walkCount > 0) eventLog.markPerimeter();
+      if (result.walkCount > 0) {
+        eventLog.markPerimeter();
+        eventLog.clearPerimeter();
+        eventLog.markPerimeter();
+      }
       eventLog.markComponent();
     }
   }

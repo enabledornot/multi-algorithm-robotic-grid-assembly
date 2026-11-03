@@ -269,6 +269,7 @@ function draw() {
         for (const update of ev.updates) cellColors[`${update.col},${update.row}`] = update.color;
       }
       else if (ev.type === 'markBorder' && !(edgeData.algorithm === 'outer-peel' && document.getElementById('anim-level').value === 'wavefront')) perimeterSides.push(ev);
+      else if (ev.type === 'clearPerimeter') perimeterSides.length = 0;
       else if (ev.type === 'addEdge') edges.push(ev);
       else if (ev.type === 'colorDot') blackDots.add(`${ev.col},${ev.row}`);
       else if (ev.type === 'labelCell') cellLabels[`${ev.col},${ev.row}`] = ev.label;
